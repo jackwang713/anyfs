@@ -1,0 +1,58 @@
+anyFS: macOS 上为 QEMU raw 块设备接通 TRIM (DKIOCUNMAP)
+=========================================================
+背景: macOS 没有 BLKDISCARD, QEMU 上游在 macOS 上 discard 请求全部静默丢弃.
+本补丁在 handle_aiocb_discard 中增加 DKIOCUNMAP ioctl 分支 (含 EINTR 重试),
+并把 translate_err 的编译守卫扩展到 __APPLE__ 平台.
+验证: guest fstrim/ntfs3 -o discard → 读回全零 (unmap-live 金标准), 整盘与分区 fd 均通过.
+
+应用: cd qemu-11.1.2 && patch -p1 < ../patches/qemu-11.1.2-macos-dkiocunmap-trim.patch
+构建: 参见 spike/build.sh (MacPorts 依赖, 清华镜像)
+
+--- a/block/file-posix.c
++++ b/block/file-posix.c
+@@ -59,6 +59,10 @@
+ //#include <IOKit/storage/IOCDTypes.h>
+ #include <IOKit/storage/IODVDMedia.h>
+ #include <CoreFoundation/CoreFoundation.h>
++#endif
++
++#if defined(__APPLE__) && defined(__MACH__)
++#include <sys/disk.h>
+ #endif
+ 
+ #ifdef __sun__
+@@ -1935,7 +1939,8 @@
+     }
+ }
+ 
+-#if defined(CONFIG_FALLOCATE) || defined(BLKZEROOUT) || defined(BLKDISCARD)
++#if defined(CONFIG_FALLOCATE) || defined(BLKZEROOUT) || defined(BLKDISCARD) || \
++    (defined(__APPLE__) && defined(__MACH__))
+ static int translate_err(int err)
+ {
+     if (err == -ENODEV || err == -ENOSYS || err == -EOPNOTSUPP ||
+@@ -2303,6 +2308,24 @@
+ 
+         ret = translate_err(-errno);
+ #endif
++#if defined(__APPLE__) && defined(__MACH__)
++        do {
++            dk_extent_t extent = {
++                .offset = aiocb->aio_offset,
++                .length = aiocb->aio_nbytes,
++            };
++            dk_unmap_t unmap = {
++                .extents = &extent,
++                .extentsCount = 1,
++                .options = 0,
++            };
++            if (ioctl(aiocb->aio_fildes, DKIOCUNMAP, &unmap) == 0) {
++                return 0;
++            }
++        } while (errno == EINTR);
++
++        ret = translate_err(-errno);
++#endif
+     } else {
+ #ifdef CONFIG_FALLOCATE_PUNCH_HOLE
+         ret = do_fallocate(s->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,

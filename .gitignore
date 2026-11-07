@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# --- 大二进制 (可再生, 不进库) ---
+# QEMU 源码+构建树 (1.6G) — 用 spike/patches/ 里的补丁重建
+spike/qemu-11.1.2/
+spike/qemu-11.1.2.tar.xz
+spike/qemu-11.1.2.tar.xz.bad.html
+spike/qemu-build/
+# Alpine ISO/kernel/initrd (~83M, 清华镜像可下载)
+spike/alpine/
+# 192M, sudo spike/guest-mk-bundle.sh 重建
+spike/bundle/bundle.img
+# 由 bundle/rootfs 重打包: COPYFILE_DISABLE=1 tar czf bundle.tar.gz -C rootfs .
+spike/bundle/bundle.tar.gz
+# apk 下载缓存
+spike/bundle/apks/
+
+# --- 编译产物 ---
+daemon/anyfsd
+daemon/anyfsctl
+app/anyfs-app
+app/AnyFS.app/
+spike/spike
+spike/unmap-probe
+spike/unmap-live
+
+# --- 运行时残留 ---
+*.log
+serial*.in
+serial*.out
