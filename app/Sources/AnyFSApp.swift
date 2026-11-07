@@ -26,10 +26,19 @@ struct PartInfo: Identifiable, Equatable {
     let active: Bool      // anyFS 接管中
     let disk: String      // 父盘, 如 disk3
     let model: String     // 盘型号, 如 RTL9210B-CG
-    // guest init.sh 的共享名规则: 空格转下划线
-    var shareName: String { label.replacingOccurrences(of: " ", with: "_") }
+    // 共享名规则 (与 daemon 注入/init.sh 一致): 纯 ASCII 用卷标, 否则回退 bsd;
+    // mount_smbfs URL 解析器不接受非 ASCII, 共享名只能出 ASCII
+    var shareName: String {
+        let base = (!label.isEmpty && label.allSatisfy(\.isASCII)) ? label : id
+        return base.replacingOccurrences(of: " ", with: "_")
+    }
     // 三态文案: 回答"我现在能不能往里拷东西"
-    var stateText: String { active ? "可读写" : (mounted ? "只读" : "未挂载") }
+    // 注意: macOS 原生挂载的读写性因文件系统而异 — NTFS 只读, FAT32/exFAT 原生可读写
+    var stateText: String {
+        if active { return "可读写" }
+        if mounted { return fs.lowercased().contains("ntfs") ? "macOS 只读" : "macOS 读写" }
+        return "未挂载"
+    }
     var stateColor: Color { active ? .green : (mounted ? .blue : .gray) }
     // NTFS 由 discard 在线养护, 无按钮; exFAT/ext* 需要手动 fstrim
     var needsManualTrim: Bool {

@@ -22,6 +22,18 @@ echo "BRIDGE-INIT $(date)"
 
 mkdir -p /mnt
 
+# 真实卷标映射 (daemon 经串口注入 /tmp/anyfs-names, 格式 sda=卷标):
+# busybox blkid 读非 ASCII 卷标 (如中文 FAT32 卷标的 OEM 字符集) 会乱码,
+# 乱码共享名导致 SMB 枚举崩溃/挂载失败, 故卷标以宿主侧 diskutil 为准
+get_name() {
+    dev=$(basename "$1")
+    if [ -f /tmp/anyfs-names ]; then
+        n=$(sed -n "s|^$dev=||p" /tmp/anyfs-names | head -1)
+        [ -n "$n" ] && { echo "$n"; return; }
+    fi
+    echo "${2:-$dev}"
+}
+
 # --- 探测并挂载所有受支持分区 ---
 # 整盘直通: 文件系统在 sda1..n; 分区直通: 每个直通分区是一块独立盘 (/dev/sda, /dev/sdb ...)
 # (整盘的 blkid 只有 PTTYPE 没有 TYPE, 会被下面的类型过滤自动跳过, 故两种形态可共用一份列表)
@@ -31,7 +43,8 @@ for part in /dev/sd[a-z][0-9]* /dev/sd[a-z]; do
     eval "$(echo "$info" | sed 's/^[^ ]* //;s/\bUUID="[^"]*"//g')" 2>/dev/null
     [ -z "${TYPE:-}" ] && continue
     case "$TYPE" in ntfs|exfat|vfat|ext4|ext3|ext2) ;; *) continue;; esac
-    name="${LABEL:-$(basename $part)}"
+    # 卷标优先用 daemon 注入的真实值, 回退 blkid (ASCII 卷标时两者一致)
+    name=$(get_name "$part" "$LABEL")
     # 名字消毒: 空格转下划线
     name=$(echo "$name" | tr ' ' '_')
     mp="/mnt/$name"

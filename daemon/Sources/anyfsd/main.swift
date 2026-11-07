@@ -23,9 +23,11 @@ struct Config {
     static let xpcName     = "com.anyfs.daemon"
     static let logPath     = "/var/log/anyfsd.log"
     static let statePath   = "/tmp/anyfsd.state"
-    // 可接管的文件系统 (diskutil list -plist 的字段值)
+    // 可接管的文件系统 (diskutil list -plist 的字段值; MBR 盘的 Content 命名不同, 见下)
     static let supportedFSTypes: Set<String> = ["ntfs","exfat","msdos","vfat","ext4","ext3","ext2"]
-    static let supportedContent: Set<String> = ["Microsoft Basic Data","Basic Data","Linux","Linux Filesystem"]
+    static let supportedContent: Set<String> = ["Microsoft Basic Data","Basic Data","Linux","Linux Filesystem",
+                                                "Windows_FAT_32","Windows_FAT_16","Windows_NTFS","Windows_EXFAT",
+                                                "DOS_FAT_32","DOS_FAT_16","DOS_FAT_12"]
 
     // pkg 安装后资产位于 .app/Contents/Resources, 由 postinstall 写 conf 覆盖路径
     static func loadOverrides() {
@@ -179,6 +181,7 @@ final class QMPClient {
 // MARK: - QEMU 管理 (一个 VM, 可挂多个分区设备)
 final class QEMUManager {
     let partitions: [String]
+    var partLabels: [String: String] = [:]   // bsd → 真实卷标 (宿主 diskutil 为准)
     private var process: Process?
     private(set) var state = "stopped"
     let serial = SerialPipe(base: Config.serialBase)
@@ -275,6 +278,15 @@ final class QEMUManager {
         serial.send("ip link set eth0 up && udhcpc -i eth0 -q\n")
         Thread.sleep(forTimeInterval: 2)
         serial.send("mount -t ext2 -o ro /dev/vdb /opt\n")
+        // 注入真实卷标映射: guest busybox blkid 读非 ASCII 卷标 (中文 FAT32 等) 会乱码
+        for (i, part) in partitions.enumerated() {
+            guard let label = partLabels[part], !label.isEmpty,
+                  let ch = UnicodeScalar(97 + i) else { continue }   // sda, sdb, ...
+            let safe = label.replacingOccurrences(of: "'", with: "")
+                            .replacingOccurrences(of: "\\", with: "")
+                            .replacingOccurrences(of: "\n", with: "")
+            serial.send("echo 'sd\(ch)=\(safe)' >> /tmp/anyfs-names\n")
+        }
         serial.send("sh /opt/init.sh\n")
         state = "guest-init"
         if waitFor("BRIDGE-READY", timeout: 120) {
@@ -503,6 +515,21 @@ final class DiskManager {
         return (obj["MediaName"] as? String) ?? wholeBsd
     }
 
+    // 真实卷标 (注入 guest 用; diskutil 读非 ASCII 卷标无乱码问题)
+    private func volumeNameOf(_ bsd: String) -> String {
+        let t = Process()
+        t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        t.arguments = ["info", "-plist", bsd]
+        let pipe = Pipe()
+        t.standardOutput = pipe
+        t.standardError = FileHandle.nullDevice
+        try? t.run()
+        t.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let obj = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return "" }
+        return (obj["VolumeName"] as? String) ?? ""
+    }
+
     // 枚举外接盘上的可接管分区 (NTFS/exFAT/ext* 等)
     func listAvailable() -> [[String: Any]] {
         var out: [[String: Any]] = []
@@ -524,9 +551,16 @@ final class DiskManager {
                 guard let bsd = p["DeviceIdentifier"] as? String else { continue }
                 let fs = (p["FilesystemType"] as? String ?? "").lowercased()
                 let content = p["Content"] as? String ?? ""
-                guard Config.supportedFSTypes.contains(fs) || Config.supportedContent.contains(content) else { continue }
-                let volName = (p["VolumeName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                // EFI 系统分区永不列为候选 (macOS 原生可读写, 接管零收益且是引导分区)
+                if content == "EFI" { continue }
+                // MBR 盘的 Content 命名与 GPT 不同 (Windows_FAT_32 等),
+                // 且 list -plist 不填 FilesystemType — 先用 info 拿真实 fs 类型再过滤
                 let infoFS = fsTypeOf(bsd)
+                let infoMatch = Config.supportedFSTypes.contains(infoFS.lowercased())
+                    || infoFS.lowercased().contains("ntfs") || infoFS.lowercased().contains("exfat")
+                    || infoFS.lowercased().contains("fat") || infoFS.lowercased().contains("ext")
+                guard Config.supportedFSTypes.contains(fs) || Config.supportedContent.contains(content) || infoMatch else { continue }
+                let volName = (p["VolumeName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 let parent = parentDisk(of: bsd)
                 out.append([
                     "bsd": bsd,
@@ -570,6 +604,13 @@ final class DiskManager {
             FileManager.default.createFile(atPath: Config.statePath, contents: "taking-over \(parts.joined(separator: ","))\n".data(using: .utf8))
 
             let q = QEMUManager(partitions: parts)
+            // 共享名只出 ASCII: mount_smbfs 的 URL 解析器不接受非 ASCII, smbutil 枚举也会崩;
+            // 非 ASCII 卷标回退用 bsd 设备名 (UI 仍显示真卷标, 共享名是内部细节)
+            q.partLabels = Dictionary(uniqueKeysWithValues: parts.map { part in
+                let label = self.volumeNameOf(part)
+                let asciiOK = !label.isEmpty && label.allSatisfy { $0.isASCII }
+                return (part, asciiOK ? label : part)
+            })
             self.qemu = q
             do {
                 try q.start()

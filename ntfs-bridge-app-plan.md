@@ -630,6 +630,17 @@ anyfsctl eject   → 三段式干净退出, QEMU code=0
 
 **S6 剩余**：pkgbuild 打 .pkg（root=stage/Applications + scripts/postinstall）、安装说明（分版本 Gatekeeper 指引+FDA 引导）、（可选）公证脚本留 SIGN_ID=Developer ID 参数位。
 
+### 兼容性修复：MBR 盘 + 非 ASCII 卷标（2026-11-07 晚）
+
+| 问题 | 根因 | 修法 |
+|---|---|---|
+| MBR U盘（老毛桃 FAT32）不出现在列表 | `diskutil list -plist` 的 Content 命名按分区表类型分两套：GPT=`Microsoft Basic Data`，MBR=`Windows_FAT_32/Windows_NTFS/DOS_FAT_32…`；且 FilesystemType 恒为空 | 过滤前先用 `diskutil info -plist` 拿真实 fs 类型（fsTypeOf 前置），命名差异全免疫；白名单同步补 MBR 命名；EFI 显式排除保留 |
+| FAT32 共享"挂载失败"，smbutil view Broken pipe | **guest busybox blkid 读非 ASCII 卷标（中文 FAT32 卷标为 OEM 字符集）乱码**，乱码共享名致 SMB 枚举崩溃 | daemon 用 `diskutil info` 的真卷标经串口注入 `/tmp/anyfs-names`（sda=卷标），init.sh `get_name` 优先读映射 |
+| 注入真中文卷标后 mount_smbfs 仍失败 | **macOS SMB 客户端 URL 解析器不接受非 ASCII**（原始中文报 URL parsing failed，百分号编码不解码报共享不存在） | 共享名强制 ASCII 化：纯 ASCII 卷标用卷标，否则回退 bsd 设备名（`disk2s1`）；daemon 注入与 App shareName 同一规则。UI 仍显示真卷标 |
+| macOS 挂载态文案"只读"错误 | 只有 NTFS 只读，FAT32/exFAT 原生可读写 | stateText 按 fs 区分："macOS 只读"(ntfs) / "macOS 读写" |
+
+遗留优化：App 挂载改 NetFS 框架可支持中文共享名（macOS 客户端限制，非 Samba/协议限制）。**运维教训**：daemon conf 指向 /Applications 包内资产后，重烧 spike bundle 必须同步（cp 或重跑 assemble），否则 VM 跑的是旧 init.sh。
+
 ### 验证方法论
 
 - **TRIM 探针**：exFAT 空闲区写 0x5A 图案 → 删除 → UNMAP → 读回（全零=执行 / 图案在=被吞）。已演进为 App 内置每设备自检设计。
