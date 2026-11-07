@@ -31,3 +31,6 @@ serial*.in
 serial*.out
 spike/rand-torture
 spike/scsi-probe
+
+# 打包 staging (collect-qemu.sh 可再生)
+packaging/stage/

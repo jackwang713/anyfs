@@ -7,14 +7,15 @@ import Foundation
 import DiskArbitration
 import SystemConfiguration   // SCDynamicStoreCopyConsoleUser: 取当前登录用户 uid
 
-// MARK: - 配置 (dev 模式, 后续挪到 /usr/local/etc/anyfsd.conf)
+// MARK: - 配置 (打包形态: /usr/local/etc/anyfsd.conf 覆盖 dev 默认路径)
 struct Config {
+    static let confPath    = "/usr/local/etc/anyfsd.conf"
     static let spikeDir    = "/Users/jack/anyfs/spike"
-    static let qemu        = "\(spikeDir)/qemu-11.1.2/build/qemu-system-x86_64"
-    static let kernel      = "\(spikeDir)/alpine/vmlinuz-virt"
-    static let initrd      = "\(spikeDir)/alpine/initramfs-virt"
-    static let iso         = "\(spikeDir)/alpine/alpine-virt.iso"
-    static let bundle      = "\(spikeDir)/bundle/bundle.img"
+    static var qemu        = "\(spikeDir)/qemu-11.1.2/build/qemu-system-x86_64"
+    static var kernel      = "\(spikeDir)/alpine/vmlinuz-virt"
+    static var initrd      = "\(spikeDir)/alpine/initramfs-virt"
+    static var iso         = "\(spikeDir)/alpine/alpine-virt.iso"
+    static var bundle      = "\(spikeDir)/bundle/bundle.img"
     static let guestMemMB  = 128
     static let guestSMP    = 2
     static let serialBase  = "/tmp/anyfsd-serial"
@@ -25,6 +26,26 @@ struct Config {
     // 可接管的文件系统 (diskutil list -plist 的字段值)
     static let supportedFSTypes: Set<String> = ["ntfs","exfat","msdos","vfat","ext4","ext3","ext2"]
     static let supportedContent: Set<String> = ["Microsoft Basic Data","Basic Data","Linux","Linux Filesystem"]
+
+    // pkg 安装后资产位于 .app/Contents/Resources, 由 postinstall 写 conf 覆盖路径
+    static func loadOverrides() {
+        guard let s = try? String(contentsOfFile: confPath, encoding: .utf8) else { return }
+        for line in s.split(separator: "\n") {
+            let kv = line.split(separator: "=", maxSplits: 1).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard kv.count == 2, !kv[0].hasPrefix("#") else { continue }
+            switch kv[0] {
+            case "QEMU":   qemu   = kv[1]
+            case "KERNEL": kernel = kv[1]
+            case "INITRD": initrd = kv[1]
+            case "ISO":    iso    = kv[1]
+            case "BUNDLE": bundle = kv[1]
+            default: break
+            }
+        }
+        log("已加载 \(confPath): qemu=\(qemu)")
+    }
 }
 
 // MARK: - 日志
@@ -779,6 +800,7 @@ intSrc.setEventHandler {
 intSrc.resume()
 
 log("anyfsd 启动 (S5.1 分区级直通)")
+Config.loadOverrides()
 DiskManager.shared.start()
 let xpcService = XPCService()
 xpcService.start()

@@ -2,6 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- HVF (Hypervisor.framework): 证书签名的二进制必须显式声明;
+         ad-hoc 签名豁免此检查 (开发期 spike 二进制一直裸跑的原因) -->
+    <key>com.apple.security.hypervisor</key>
+    <true/>
+    <!-- Virtualization.framework (VZ), 备用 -->
     <key>com.apple.security.virtualization</key>
     <true/>
 </dict>

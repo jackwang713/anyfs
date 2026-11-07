@@ -611,6 +611,25 @@ anyfsctl eject   → 三段式干净退出, QEMU code=0
 - **配置定稿**：2 核 / 128MB 默认，不做开机启动，设置页留待后续版本
 - **遗留 backlog**：QMP 热插拔消除增删分区时的 VM 重启（~15s 中断）；设置页（内存/CPU 档位）
 
+### S6 打包管线（2026-11-07，自包含包已跑通）
+
+产物：`AnyFS.app`（321MB 全自包含，bundle.img 192M + Alpine ISO 60M + QEMU 45M）。脚本在 `packaging/`：`collect-qemu.sh`（依赖收集+固件+签名+自检）、`assemble-app.sh`（一键组包）、`install-daemon-from-app.sh`（pkg postinstall 原型，写 /usr/local/etc/anyfsd.conf 覆盖资产路径，daemon 已支持 conf 覆盖）。
+
+**零成本分发决策**：自签 anyfs-dev 走全流程；用户侧两道手动关卡（Gatekeeper 放行：13/14 右键打开、15+ 只能系统设置→隐私与安全性；FDA 授权 anyfsd），安装说明按版本写。兼容性：macOS 13 构建机覆盖 13/14/15+ Intel（低版本构建向高版本跑，勿反向）；ARM 需另起 qemu-system-aarch64 + aarch64 guest，暂缓。
+
+**S6 踩坑清单（全部已固化进脚本自检，重跑 assemble 即全量回归）**：
+1. MacPorts dylib 散落 /opt/local → BFS 收集 26 个 + install_name_tool 重写（qemu→@executable_path/../lib，互引→@loader_path）
+2. anyfsd 漏签 → FDA 按证书身份失效，开裸盘 EPERM（"Operation not permitted" 是 TCC 不是 EBUSY）
+3. codesign --force 丢 entitlements → HVF "Could not access HVF"；**ad-hoc 签名豁免 HVF 检查，证书签名强制**，需 com.apple.security.hypervisor（≠ virtualization）
+4. BIOS 固件缺失：预编译 blob 在**源码树** pc-bios/（build/pc-bios 只有 edk2 等构建产物）；QEMU 从 <exe_dir>/../share/qemu 找固件 → 布局 bin/lib/share/qemu；QEMU 11 无 linuxboot.bin/multiboot.bin（只剩 *_dma）；virtio-net 需 efi-virtio.rom
+5. 冒烟测试带 -S = 假阳性（不触发固件加载）；WARN 被 grep 过滤吞掉；set -e 不穿管道（要 pipefail）
+6. pipefail + `codesign|grep -q` = SIGPIPE(141) 误判（grep -q 提前退出杀上游）→ 一律先捕获输出再匹配
+7. 钥匙串弹窗循环：27 文件逐个签 → 批量一次签；`security set-key-partition-list` 一劳永逸
+8. codesign -dv（单v）不打印 Authority，要 -dvv
+9. git 首提交教训：.gitignore 不支持行尾注释（# 必须行首）；1.6G QEMU 树不入库，TRIM 补丁提取至 spike/patches/
+
+**S6 剩余**：pkgbuild 打 .pkg（root=stage/Applications + scripts/postinstall）、安装说明（分版本 Gatekeeper 指引+FDA 引导）、（可选）公证脚本留 SIGN_ID=Developer ID 参数位。
+
 ### 验证方法论
 
 - **TRIM 探针**：exFAT 空闲区写 0x5A 图案 → 删除 → UNMAP → 读回（全零=执行 / 图案在=被吞）。已演进为 App 内置每设备自检设计。
