@@ -1,0 +1,61 @@
+#!/bin/bash
+# AnyFS.pkg postinstall — 安装 daemon + 写资产路径配置 + 注册 launchd
+# pkg 脚本以 root 运行; $2 = 安装目标根 (通常为 /)
+set -e
+APP="$2/Applications/AnyFS.app"
+RES="$APP/Contents/Resources"
+LABEL=com.anyfs.daemon
+PLIST=/Library/LaunchDaemons/$LABEL.plist
+BIN=/Library/PrivilegedHelperTools/anyfsd
+
+mkdir -p /Library/PrivilegedHelperTools /usr/local/etc
+cp "$RES/daemon/anyfsd" "$BIN"
+chmod 755 "$BIN"
+
+cat > /usr/local/etc/anyfsd.conf <<EOF
+QEMU=$RES/qemu/bin/qemu-system-x86_64
+KERNEL=$RES/guest/vmlinuz-virt
+INITRD=$RES/guest/initramfs-virt
+ISO=$RES/guest/alpine-virt.iso
+BUNDLE=$RES/guest/bundle.img
+EOF
+chmod 644 /usr/local/etc/anyfsd.conf
+
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$BIN</string>
+    </array>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>MachServices</key>
+    <dict>
+        <key>$LABEL</key>
+        <true/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/anyfsd-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/anyfsd-stdout.log</string>
+</dict>
+</plist>
+EOF
+chmod 644 "$PLIST"
+
+launchctl bootout system/$LABEL 2>/dev/null || true
+for i in $(seq 1 30); do
+    launchctl print system/$LABEL >/dev/null 2>&1 || break
+    sleep 1
+done
+launchctl bootstrap system "$PLIST" 2>/dev/null || true
+
+echo "anyFS: daemon 已安装. 首次使用前请授予 anyfsd 完全磁盘访问权限."
+exit 0
