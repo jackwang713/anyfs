@@ -21,7 +21,13 @@ chmod +x "$SCRIPTS/postinstall"
 
 echo "== 3/3 pkgbuild =="
 rm -f "$OUT"
+# 组件属性: BundleIsRelocatable=false 禁止安装器把 App 重定位到系统里已存在的同名 bundle
+# (注意: 必须写在 pkgbuild 的 component plist 里, 写 App 的 Info.plist 不生效 — 踩过)
+COMPS=$ROOT/packaging/components.plist
+pkgbuild --analyze --root "$STAGE_PKG" "$COMPS"
+plutil -replace 0.BundleIsRelocatable -bool false "$COMPS"
 pkgbuild --root "$STAGE_PKG" \
+    --component-plist "$COMPS" \
     --scripts "$SCRIPTS" \
     --identifier com.anyfs.pkg \
     --version "$VERSION" \

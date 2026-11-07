@@ -34,3 +34,9 @@ spike/scsi-probe
 
 # 打包 staging (collect-qemu.sh 可再生)
 packaging/stage/
+
+# pkg 构建产物
+packaging/pkg-stage/
+packaging/*.pkg
+packaging/components.plist
+packaging/pkg-scripts/

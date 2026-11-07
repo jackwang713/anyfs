@@ -2,8 +2,16 @@
 # AnyFS.pkg postinstall — 安装 daemon + 写资产路径配置 + 注册 launchd
 # pkg 脚本以 root 运行; $2 = 安装目标根 (通常为 /)
 set -e
+# 安装器可能把 App "重定位" 到机器上已存在的同名 bundle (LaunchServices 按 bundle ID 匹配),
+# 所以先查默认路径, 找不到就用 Spotlight 定位实际落点 (升级/用户挪过位置同理)
 APP="$2/Applications/AnyFS.app"
+if [ ! -x "$APP/Contents/Resources/daemon/anyfsd" ]; then
+    FOUND=$(mdfind "kMDItemCFBundleIdentifier == 'com.anyfs.app'" 2>/dev/null | head -1)
+    [ -n "$FOUND" ] && [ -x "$FOUND/Contents/Resources/daemon/anyfsd" ] && APP="$FOUND"
+fi
 RES="$APP/Contents/Resources"
+[ -x "$RES/daemon/anyfsd" ] || { echo "postinstall: 找不到 AnyFS.app (relocation 且 mdfind 未命中)"; exit 1; }
+echo "postinstall: AnyFS.app 位于 $APP"
 LABEL=com.anyfs.daemon
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 BIN=/Library/PrivilegedHelperTools/anyfsd

@@ -23,6 +23,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key><string>anyFS</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <!-- 禁止 pkg 安装器把 App 重定位到系统中已存在的同名 App (如构建目录里的) -->
+    <key>BundleIsRelocatable</key><false/>
     <key>CFBundleVersion</key><string>0.1</string>
     <key>CFBundleShortVersionString</key><string>0.1</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
