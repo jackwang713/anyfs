@@ -29,3 +29,5 @@ spike/unmap-live
 *.log
 serial*.in
 serial*.out
+spike/rand-torture
+spike/scsi-probe
