@@ -641,6 +641,8 @@ anyfsctl eject   → 三段式干净退出, QEMU code=0
 
 遗留优化：App 挂载改 NetFS 框架可支持中文共享名（macOS 客户端限制，非 Samba/协议限制）。**运维教训**：daemon conf 指向 /Applications 包内资产后，重烧 spike bundle 必须同步（cp 或重跑 assemble），否则 VM 跑的是旧 init.sh。
 
+**养护链路的两个后续修正**（实测发现）：① 🍃 按分区养护曾"假成功"——App 误传显示名（非 ASCII 卷标）而非 shareName，guest 无此挂载点，fstrim 静默失败；已改为传 shareName，且 trimPartition 回传 fstrim 真实输出（成功显示修剪量，失败显示错误）。② 判读工具 `spike/check-trim.sh`（QMP query-blockstats）：unmap_ops 计数在 **SCSI 设备模型的完成回调**里记（hw/scsi/scsi-disk.c，取决于 host DKIOCUNMAP 真实返回值），故 ops>0&failed=0 = 端到端受理；注意 unmap_bytes 是累计请求量不去重（同区域多次 fstrim 重复计），展示"本次修剪量"需前后快照取差。
+
 ### 验证方法论
 
 - **TRIM 探针**：exFAT 空闲区写 0x5A 图案 → 删除 → UNMAP → 读回（全零=执行 / 图案在=被吞）。已演进为 App 内置每设备自检设计。

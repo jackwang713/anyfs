@@ -143,10 +143,11 @@ final class DaemonClient: ObservableObject {
     }
 
     // 按分区养护 (exFAT/ext*; NTFS 无此按钮)
+    // 注意: 必须传 shareName (guest 挂载点同名), 显示 label 可能是非 ASCII
     func trim(_ p: PartInfo) {
         guard !busy else { return }
         trimming.insert(p.id)
-        proxy?.trimPartition(p.label as NSString) { [weak self] _ in
+        proxy?.trimPartition(p.shareName as NSString) { [weak self] _ in
             Task { @MainActor in self?.trimming.remove(p.id); self?.refresh() }
         }
     }

@@ -10,6 +10,7 @@ import Foundation
     func release(_ partitions: NSArray, withReply reply: @escaping (NSString) -> Void)
     func releaseAll(withReply reply: @escaping (NSNumber) -> Void)
     func trimNow(withReply reply: @escaping (NSString) -> Void)
+    func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -60,8 +61,14 @@ case "release":
         proxy.release(parts as NSArray) { s in print("release: \(s)"); sem.signal() }
     }
 case "trim":
-    print("fstrim 执行中 (exFAT/ext4 分区, 可能需数秒~数分钟)...")
-    proxy.trimNow { s in print("trim: \(s)"); sem.signal() }
+    if CommandLine.arguments.count > 2 {
+        let name = CommandLine.arguments[2]
+        print("fstrim /mnt/\(name) (按分区养护)...")
+        proxy.trimPartition(name as NSString) { s in print("trim: \(s)"); sem.signal() }
+    } else {
+        print("fstrim 执行中 (全部已挂载分区, 可能需数秒~数分钟)...")
+        proxy.trimNow { s in print("trim: \(s)"); sem.signal() }
+    }
 case "quit":
     proxy.appQuit { _ in print("quit: 已通知 daemon 收尸自毁"); sem.signal() }
 default:

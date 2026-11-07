@@ -133,6 +133,12 @@ final class SerialPipe {
         guard offset < transcript.count else { return false }
         return transcript[transcript.index(transcript.startIndex, offsetBy: offset)...].contains(needle)
     }
+
+    func substringAfter(_ offset: Int) -> String {
+        lock.lock(); defer { lock.unlock() }
+        guard offset < transcript.count else { return "" }
+        return String(transcript[transcript.index(transcript.startIndex, offsetBy: offset)...])
+    }
 }
 
 // MARK: - QMP 客户端 (QEMU monitor JSON 协议)
@@ -738,14 +744,21 @@ final class DiskManager {
     }
 
     // 按分区养护 (UI 每行的 🍃 按钮; NTFS 无此按钮 — discard 在线养护)
-    func trimPartition(_ label: String) -> String {
+    // 参数为共享名 (guest 挂载点同名, 已 ASCII 化); 回传 fstrim 的真实输出防"假成功"
+    func trimPartition(_ name: String) -> String {
         guard let q = qemu, q.state == "ready" else { return "无活动分区或未就绪" }
-        let name = label.replacingOccurrences(of: " ", with: "_")
         let off = q.serial.length
         q.serial.send("fstrim /mnt/\(name) 2>&1 | sed 's|^|TRIM-PART: |'; echo TRIM-PART-DONE\n")
         let deadline = Date().addingTimeInterval(180)
         while Date() < deadline {
-            if q.serial.containsAfter("TRIM-PART-DONE", offset: off) { return "已修剪 \(label)" }
+            if q.serial.containsAfter("TRIM-PART-DONE", offset: off) {
+                let out = q.serial.substringAfter(off)
+                let detail = out.split(separator: "\n")
+                    .filter { $0.hasPrefix("TRIM-PART:") }
+                    .last
+                    .map { String($0.dropFirst(10)).trimmingCharacters(in: .whitespaces) } ?? ""
+                return detail.isEmpty ? "已修剪 \(name)" : "\(name): \(detail)"
+            }
             Thread.sleep(forTimeInterval: 0.5)
         }
         return "fstrim 超时"
