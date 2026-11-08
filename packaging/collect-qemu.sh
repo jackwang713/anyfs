@@ -15,7 +15,7 @@ STAGE="${1:-stage}"
 # 架构分支: 二进制名 / 机器类型 / 固件集 / 依赖前缀默认值
 case "$(uname -m)" in
   arm64)
-    QEMU_BIN=$QEMU_BIN
+    QEMU_BIN=qemu-system-aarch64
     MACHINE="virt,accel=hvf"
     # ARM (-kernel 直启) 不需要 BIOS, 但 virtio-net-pci 初始化时要能找到 option ROM
     # (不执行, 仅查找; 实测缺失直接拒绝启动: failed to find romfile)
