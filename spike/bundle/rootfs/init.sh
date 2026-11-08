@@ -62,7 +62,8 @@ for part in /dev/sd[a-z][0-9]* /dev/sd[a-z]; do
                 || echo "BRIDGE-MOUNT $TYPE $part $name FAIL"
             ;;
         ext4|ext3|ext2)
-            mount -t "$TYPE" "$part" "$mp" 2>/dev/null \
+            # -o discard: 在线养护 (与 ntfs3 一致, 删除即 TRIM); fstrim 作为补充手段
+            mount -t "$TYPE" -o discard "$part" "$mp" 2>/dev/null \
                 && echo "BRIDGE-MOUNT $TYPE $part $name OK" \
                 || echo "BRIDGE-MOUNT $TYPE $part $name FAIL"
             ;;
@@ -90,6 +91,9 @@ done
         echo '  read only = no'
         echo '  guest ok = yes'
         echo '  force user = root'
+        # ext4 等 POSIX 文件系统: 新建文件/目录人人可写, 拿回 Linux 主机后普通用户可正常增删
+        echo '  create mask = 0666'
+        echo '  directory mask = 0777'
     done
 } > /tmp/smb.conf
 
