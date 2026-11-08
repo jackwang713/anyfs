@@ -4,7 +4,7 @@
 # 用法: ./assemble-app.sh   (普通用户, 不需要 sudo)
 set -e
 set -o pipefail   # collect 经管道过滤时, 其失败也必须终止组包 (踩过: grep 吃掉退出码)
-ROOT=/Users/jack/anyfs
+ROOT=/Users/jack/Documents/anyfs
 APP=$ROOT/app/AnyFS.app
 RES=$APP/Contents/Resources
 

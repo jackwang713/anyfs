@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 
-QEMU=/Users/jack/anyfs/spike/qemu-11.1.2/build/qemu-system-x86_64
+QEMU=/Users/jack/Documents/anyfs/spike/qemu-11.1.2/build/qemu-system-aarch64
 PIPE=serial-wt
 
 rm -f ${PIPE}.in ${PIPE}.out qemu-wt.log qemu-wt-err.log
@@ -24,11 +24,11 @@ QEMUPID=""
 for attempt in 1 2 3 4 5; do
     diskutil unmountDisk force /dev/disk2 >/dev/null 2>&1
     "$QEMU" \
-        -machine q35,accel=hvf \
+        -machine virt,accel=hvf \
         -cpu host -smp 2 -m 512 \
         -kernel alpine/vmlinuz-virt \
         -initrd alpine/initramfs-virt \
-        -append "console=ttyS0" \
+        -append "console=ttyAMA0" \
         -drive file=alpine/alpine-virt.iso,format=raw,if=virtio,readonly=on \
         -device virtio-scsi-pci,id=scsi0 \
         -drive file=/dev/rdisk2,format=raw,if=none,id=usbdisk,discard=unmap \

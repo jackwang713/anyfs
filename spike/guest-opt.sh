@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 MEM="${1:-128}"
 echo "guest 内存: ${MEM}MB (产品形态: bundle 只读 + 零网络安装)"
 
-QEMU=/Users/jack/anyfs/spike/qemu-11.1.2/build/qemu-system-x86_64
+QEMU=/Users/jack/Documents/anyfs/spike/qemu-11.1.2/build/qemu-system-aarch64
 PIPE=serial-opt
 
 rm -f ${PIPE}.in ${PIPE}.out qemu-opt.log qemu-opt-err.log
@@ -26,11 +26,11 @@ QEMUPID=""
 for attempt in 1 2 3 4 5; do
     diskutil unmountDisk force /dev/disk2 >/dev/null 2>&1
     "$QEMU" \
-        -machine q35,accel=hvf \
+        -machine virt,accel=hvf \
         -cpu host -smp 2 -m "$MEM" \
         -kernel alpine/vmlinuz-virt \
         -initrd alpine/initramfs-virt \
-        -append "console=ttyS0" \
+        -append "console=ttyAMA0" \
         -drive file=alpine/alpine-virt.iso,format=raw,if=virtio,readonly=on \
         -drive file=bundle/bundle.img,format=raw,if=virtio,readonly=on \
         -object iothread,id=io0 \

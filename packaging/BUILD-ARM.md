@@ -98,7 +98,7 @@ assemble-app.sh / install-daemon-from-app.sh / postinstall / build-pkg.sh 无需
 ## 5. 预期性能（为什么要做 ARM 包）
 
 Intel 包的瓶颈是 QEMU 用户态网络数据面吃单核性能（实测读 ~124-185MB/s）。
-M 系单核性能 2-4 倍于 Mac mini 2018 i3，同架构下预期：读 300-500MB/s，写仍受 QLC 盘体限制 ~150-240MB/s。
+M 系单核性能 2-4 倍于 Mac mini 2018 i3。**已实测验收（2026-11-08，见第 7 节）：读 410MB/s、写 500-600MB/s**——写方向在 Intel 上同样受 CPU 约束，M 系红利比预期更大。
 **注意**：Intel 包在 M 系 Mac 上不能靠 Rosetta 用（x86 guest 无法 HVF，只能 TCG 模拟，慢到不可用）——所以 ARM 包不是可选项，是 M 系用户的唯一路径。
 
 ## 6. 验收清单（与 Intel 相同）
@@ -107,3 +107,15 @@ M 系单核性能 2-4 倍于 Mac mini 2018 i3，同架构下预期：读 300-500
 2. `sudo installer -pkg` 成功，/Applications/AnyFS.app 就位
 3. 接管 → BRIDGE-READY → Finder 可写 → 释放 → macOS 挂回
 4. TRIM 验证：guest 删文件 → QMP unmap_operations 递增（DKIOCUNMAP 补丁在 arm64 同等生效）
+
+## 7. ARM 首建实测记录（2026-11-08, macOS 15.8.1 arm64）
+
+- 全链路已跑通：QEMU 11.1.2 打补丁编译（106s）→ Alpine aarch64 ISO → bundle.img → AnyFS.app(238M) → AnyFS-0.1.pkg(104M)
+- brew 依赖 `meson ninja pkg-config libslirp`（glib/pixman 常被其他包带入已存在）
+- **串口长命令截断坑**：guest tty 吃不掉 ~95 字符以上的单行注入，命令头部静默丢失且 RC=0 假成功。解法：guest 侧逻辑固化进 `spike/bundle/mkrootfs.sh`，串口只发短 wget + sh
+- **apk --root 必须显式给 `--repository` 和 `--keys-dir /etc/apk/keys`**（initdb 后 root 内仓库/密钥皆空，否则只建骨架不装包）
+- bundle 构建无需 sudo（HVF + slirp 用户态即可）；顶层包装机清单 = `samba ntfs-3g-progs avahi dbus`
+- **证书**：openssl 3.x 导出的 p12 在本机 `security import` 报 "MAC verification failed"（-legacy/非 legacy 均败）；改为 **crt/key 分开 PEM 导入** + 用户域 `security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db` 即可，无需 sudo
+- ARM 依赖库只有 11 个（Homebrew 依赖树比 MacPorts 精简，Intel 为 26 个）
+- collect-qemu.sh 固件集 ARM 不能置空：virtio-net-pci 初始化时查找 option ROM（`-kernel` 直启不执行它，但缺文件直接拒绝启动 `failed to find romfile "efi-virtio.rom"`）；ARM 收集 `efi-virtio.rom pxe-virtio.rom` 两个即可，冒烟测试已加 virtio-net 设备覆盖此回归
+- **性能验收（真机，RTL9210B + Ti600 1TB）**：guest 裸读盘 528MB/s、guest 内 ntfs3 直写 117MB/s、SMB 读 410MB/s、SMB 写（本机数据源）500-600MB/s 平均 500+——ARM 满血达成，是 Intel 的 ~2.5-3 倍。验收期曾误判"写入只有 10MB/s"，真凶是通用剪贴板跨机粘贴走 AWDL 无线 + QLC 盘 GC，与本项目无关（完整排障记录见 ntfs-bridge-app-plan.md 文末"排障案例"节）

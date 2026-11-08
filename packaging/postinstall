@@ -21,7 +21,7 @@ cp "$RES/daemon/anyfsd" "$BIN"
 chmod 755 "$BIN"
 
 cat > /usr/local/etc/anyfsd.conf <<EOF
-QEMU=$RES/qemu/bin/qemu-system-x86_64
+QEMU=$RES/qemu/bin/qemu-system-aarch64
 KERNEL=$RES/guest/vmlinuz-virt
 INITRD=$RES/guest/initramfs-virt
 ISO=$RES/guest/alpine-virt.iso

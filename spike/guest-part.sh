@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 MEM="${1:-128}"
 echo "guest 内存: ${MEM}MB (产品形态: bundle 只读 + 零网络安装)"
 
-QEMU=/Users/jack/anyfs/spike/qemu-11.1.2/build/qemu-system-x86_64
+QEMU=/Users/jack/Documents/anyfs/spike/qemu-11.1.2/build/qemu-system-aarch64
 PIPE=serial-part
 
 # 目标分区: 按卷标自动探测 (盘符会随插拔/重启漂移, 不可写死), 可用 PART_DEV=/dev/diskXsY 覆盖
@@ -32,11 +32,11 @@ QEMUPID=""
 for attempt in 1 2 3 4 5; do
     diskutil unmount force "$PART_DEV" >/dev/null 2>&1 || true
     "$QEMU" \
-        -machine q35,accel=hvf \
+        -machine virt,accel=hvf \
         -cpu host -smp 2 -m "$MEM" \
         -kernel alpine/vmlinuz-virt \
         -initrd alpine/initramfs-virt \
-        -append "console=ttyS0" \
+        -append "console=ttyAMA0" \
         -drive file=alpine/alpine-virt.iso,format=raw,if=virtio,readonly=on \
         -drive file=bundle/bundle.img,format=raw,if=virtio,readonly=on \
         -device virtio-scsi-pci,id=scsi0 \

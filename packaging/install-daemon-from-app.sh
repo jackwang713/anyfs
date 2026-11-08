@@ -2,7 +2,7 @@
 # install-daemon-from-app.sh — 从自包含 AnyFS.app 安装 daemon (pkg postinstall 的原型)
 # 用法: sudo ./install-daemon-from-app.sh [/path/to/AnyFS.app]
 set -e
-APP="${1:-/Users/jack/anyfs/app/AnyFS.app}"
+APP="${1:-/Users/jack/Documents/anyfs/app/AnyFS.app}"
 RES="$APP/Contents/Resources"
 LABEL=com.anyfs.daemon
 PLIST=/Library/LaunchDaemons/$LABEL.plist
@@ -16,7 +16,7 @@ chmod 755 "$BIN"
 
 # 资产路径指向 .app 内 — 自包含的关键
 cat > /usr/local/etc/anyfsd.conf <<EOF
-QEMU=$RES/qemu/bin/qemu-system-x86_64
+QEMU=$RES/qemu/bin/qemu-system-aarch64
 KERNEL=$RES/guest/vmlinuz-virt
 INITRD=$RES/guest/initramfs-virt
 ISO=$RES/guest/alpine-virt.iso

@@ -10,8 +10,8 @@ import SystemConfiguration   // SCDynamicStoreCopyConsoleUser: 取当前登录�
 // MARK: - 配置 (打包形态: /usr/local/etc/anyfsd.conf 覆盖 dev 默认路径)
 struct Config {
     static let confPath    = "/usr/local/etc/anyfsd.conf"
-    static let spikeDir    = "/Users/jack/anyfs/spike"
-    static var qemu        = "\(spikeDir)/qemu-11.1.2/build/qemu-system-x86_64"
+    static let spikeDir    = "/Users/jack/Documents/anyfs/spike"
+    static var qemu        = "\(spikeDir)/qemu-11.1.2/build/qemu-system-aarch64"
     static var kernel      = "\(spikeDir)/alpine/vmlinuz-virt"
     static var initrd      = "\(spikeDir)/alpine/initramfs-virt"
     static var iso         = "\(spikeDir)/alpine/alpine-virt.iso"
@@ -218,11 +218,11 @@ final class QEMUManager {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: Config.qemu)
             var args = [
-                "-machine", "q35,accel=hvf",
+                "-machine", "virt,accel=hvf",
                 "-cpu", "host", "-smp", "\(Config.guestSMP)", "-m", "\(Config.guestMemMB)",
                 "-kernel", Config.kernel,
                 "-initrd", Config.initrd,
-                "-append", "console=ttyS0",
+                "-append", "console=ttyAMA0",
                 "-drive", "file=\(Config.iso),format=raw,if=virtio,readonly=on",
                 "-drive", "file=\(Config.bundle),format=raw,if=virtio,readonly=on",
                 "-object", "iothread,id=io0",

@@ -648,3 +648,42 @@ anyfsctl eject   → 三段式干净退出, QEMU code=0
 - **TRIM 探针**：exFAT 空闲区写 0x5A 图案 → 删除 → UNMAP → 读回（全零=执行 / 图案在=被吞）。已演进为 App 内置每设备自检设计。
 - **Ubuntu 对照实验**（佐证"JMS583 吞 TRIM"是旧固件冤案）：kernel 7.0 对 provisioning type 未知设备默认关 discard（provisioning_mode=full），`echo unmap > /sys/block/sdX/device/scsi_disk/*/provisioning_mode` 解封后 fstrim 成功 156.9 GiB；JMS583 fw0212 经 SG_IO 全形态 UNMAP 实测通过（单描述符/多描述符/256MB/63 描述符批量）。
 - **VZ 证伪**：VZDiskImageStorageDeviceAttachment 对 /dev/rdisk2 和 /dev/disk2 均识别为 0 扇区（macOS 13，只支持普通文件）；VZ 配置启动后不可变、无热插拔；VZ 不支持 VHDX（只认 raw）。原方案中引用的 VZ API（VZVirtioUSBController/VZUSBDeviceAttachment/VZSharedEthernetNetworkAdapterAttachment/VZSocketSharingNetworkInterface/VZVirtioEthernetDevice/VZLinuxBootLoaderArguments/$architecture）均不存在或不可用。
+
+### 排障案例：写入"慢到 10MB/s"+ 磁盘神秘占满（2026-11-08，ARM 移植验收期）
+
+**教训：两个看似 anyFS 的问题，根因都在 macOS 自身。以后再遇到先做对照测试，别先怀疑桥接链路。**
+
+#### 案例 A：SMB 写入 NTFS 只有 ~10MB/s，QEMU CPU 很低
+
+分层隔离测试（工具：`spike/diag-run.sh` + guest 内 diag 脚本，经串口注入执行、结果写回 NTFS 卷读回）：
+
+| 层 | 实测 | 结论 |
+|---|---|---|
+| guest 裸读盘（virtio-scsi+USB 通路） | 528 MB/s | 完好 |
+| guest 内 ntfs3 直写（oflag=direct，无 SMB） | 117 MB/s | 完好（QLC 盘体水平） |
+| SMB 读真实大文件 | 410 MB/s | 网络/签名/smbd 全部完好 |
+| SMB 写（本机数据源） | 500-600 MB/s | ARM 满血（Intel 2 核打满才 200） |
+| SMB 写（剪贴板同步期间粘贴） | **<10 MB/s** | 问题仅在此场景 |
+
+**真凶：通用剪贴板（Universal Clipboard/Continuity）**。附近有同 iCloud 账号的 Mac 且接力开启时，⌘C 的文件会被 sharingd 接管；粘贴时数据经 **AWDL 无线点对点**从另一台 Mac 边收边写（或在同步被 X 掉后走剪贴板数据提供者管道串行交付），源端喂不饱 → QEMU CPU 自然低。**与本项目无关。** 正确姿势：本机复制用拖拽（不经过剪贴板），跨机传文件用 AirDrop，大批量用 rsync/ditto。
+
+注意全零数据的 dd 写是假快（87MB/s）——macOS SMB 客户端对全零区域走零块卸载（SET_ZERO_DATA），不经过真实盘写路径；测写入必须用随机数据。
+
+#### 案例 B：系统数据暴涨 215.9GB、磁盘 100% 占满
+
+定位路径（关键坑：**sudo 不能穿透 TCC**，du 须由有"完全磁盘访问权限"的终端跑才完整；df 与 du 差额 >200GB 时优先怀疑 TCC 盲区）：
+
+```
+df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
+→ 排除: APFS 快照(无) / 已删除未释放文件(lsof +L1 无) / 挂载点覆盖(无) / 废纸篓(0B)
+→ 真身: ~/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard = 175GB
+```
+
+**机制**：通用剪贴板把 ⌘C 的文件**完整暂存**到该目录供其他设备拉取，useractivityd 本应自动清理但存在泄漏（取消/中断的传输不被回收；也未注册进 macOS CacheDelete 磁盘压力清理名单）。同类案例：mole issue #1178 整理电影飙 300GB、Apple 社区 370GB。**苹果官方无文档无开关**（[官方储存空间文档](https://support.apple.com/zh-cn/102624)对"系统数据"只有一句"通用类别"）。
+
+**处理**：`rm -rf ~/Library/Group\ Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/*`（安全，系统下次传输自动重建；建议只清 1 小时前的条目以免切断进行中的同步）。日常清理工具：[Mole](https://github.com/tw93/mole)（`brew install mole`，开源，源码含该目录的 1 小时安全闸清理）；腾讯柠檬不覆盖此目录。
+
+#### 对本项目的启示（backlog）
+
+- App 可加防护：SMB 挂载掉线/未就绪时，若用户往原挂载点目录粘贴会写到**本机 SSD**（/Volumes 下残留目录），考虑卸载后删除空挂载点目录 + 状态提示
+- 性能问题排查顺序固化：先 guest 裸盘 dd 定盘体上限 → 再 guest 内文件级 dd 隔 SMB → 最后宿主 SMB 测；宿主侧低速先看数据源是否经剪贴板/无线
