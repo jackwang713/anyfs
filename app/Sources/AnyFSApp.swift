@@ -250,6 +250,9 @@ struct MenuPanel: View {
         }
         .padding(14)
         .frame(width: 340)
+        // 不透明底色: window 样式的 MenuBarExtra 窗口默认透明, 下层浅色时白字看不清
+        .background(Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .animation(.easeInOut(duration: 0.25), value: client.busy)
         .onAppear { client.refresh() }
         .onReceive(timer) { _ in client.refresh() }
