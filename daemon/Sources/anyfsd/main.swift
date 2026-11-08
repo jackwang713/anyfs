@@ -385,6 +385,10 @@ final class DiskManager {
     private(set) var activeParts: Set<String> = []
     private var parentDisks: Set<String> = []
     private var createdMountpoints: Set<String> = []
+    // diskutil info 结果缓存: fs类型/卷标/型号不随时间变, 且对 macOS 不认识的
+    // 分区 (ext4 等) 每次 info 都会触发真实介质探测读 (U盘灯闪的元凶), 必须缓存;
+    // 插拔/属性变更 (重格式化) 时经 DA 回调整体失效
+    private var infoCache: [String: [String: Any]] = [:]
 
     // 为 App 预建 SMB 挂载点: /Volumes 是 root:wheel 普通用户不可建,
     // 由 daemon (root) 创建并 chown 给当前登录用户, App 随后以用户身份 mount_smbfs
@@ -423,6 +427,10 @@ final class DiskManager {
         DARegisterDiskMountApprovalCallback(session, nil, { disk, _ in
             DiskManager.shared.mountApproval(disk: disk)
         }, nil)
+        // 属性变更 (重格式化/重命名卷标等) → 枚举缓存失效
+        DARegisterDiskDescriptionChangedCallback(session, nil, nil, { _, _, _ in
+            DiskManager.shared.invalidateInfoCache("磁盘属性变更")
+        }, nil)
         DASessionScheduleWithRunLoop(session, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         log("DA 注册完成 (仅枚举/拔盘保护, 不自动接管)")
     }
@@ -456,13 +464,21 @@ final class DiskManager {
         return part
     }
 
+    private func invalidateInfoCache(_ reason: String) {
+        lock.lock(); infoCache.removeAll(); lock.unlock()
+        log("枚举缓存已清空 (\(reason))")
+    }
+
     private func onAppear(_ disk: DADisk) {
         guard let bsd = wholeUSBDiskBSD(disk) else { return }
+        // bsd 名会复用 (新盘可能仍叫 disk2), 插拔一律清缓存
+        invalidateInfoCache("插入 \(bsd)")
         log("DiskArb: 外接盘插入 \(bsd) (等待 App 指令, 不自动接管)")
     }
 
     private func onDisappear(_ disk: DADisk) {
         guard let bsd = wholeUSBDiskBSD(disk) else { return }
+        invalidateInfoCache("拔出 \(bsd)")
         lock.lock()
         let affected = activeParts.filter { parentDisk(of: $0) == bsd }.sorted()
         lock.unlock()
@@ -491,8 +507,11 @@ final class DiskManager {
 
     // MARK: XPC 暴露的操作接口
 
-    // diskutil list -plist 不填 FilesystemType, 用 info 补全 (ntfs/exfat/msdos/ext*)
-    private func fsTypeOf(_ bsd: String) -> String {
+    // diskutil info 带缓存 (对 macOS 不认识的文件系统, 每次 info 都会真读盘探测)
+    private func infoOf(_ bsd: String) -> [String: Any] {
+        lock.lock()
+        if let c = infoCache[bsd] { lock.unlock(); return c }
+        lock.unlock()
         let t = Process()
         t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
         t.arguments = ["info", "-plist", bsd]
@@ -502,38 +521,26 @@ final class DiskManager {
         try? t.run()
         t.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let obj = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return "" }
+        let obj = (try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]) ?? [:]
+        lock.lock(); infoCache[bsd] = obj; lock.unlock()
+        return obj
+    }
+
+    // diskutil list -plist 不填 FilesystemType, 用 info 补全 (ntfs/exfat/msdos/ext*)
+    private func fsTypeOf(_ bsd: String) -> String {
+        let obj = infoOf(bsd)
         return (obj["FilesystemName"] as? String) ?? (obj["FilesystemType"] as? String) ?? ""
     }
 
     // 整盘型号 (UI 分组标题): MediaName, 如 "RTL9210B-CG"
     private func modelOf(_ wholeBsd: String) -> String {
-        let t = Process()
-        t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        t.arguments = ["info", "-plist", wholeBsd]
-        let pipe = Pipe()
-        t.standardOutput = pipe
-        t.standardError = FileHandle.nullDevice
-        try? t.run()
-        t.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let obj = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return wholeBsd }
+        let obj = infoOf(wholeBsd)
         return (obj["MediaName"] as? String) ?? wholeBsd
     }
 
     // 真实卷标 (注入 guest 用; diskutil 读非 ASCII 卷标无乱码问题)
     private func volumeNameOf(_ bsd: String) -> String {
-        let t = Process()
-        t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        t.arguments = ["info", "-plist", bsd]
-        let pipe = Pipe()
-        t.standardOutput = pipe
-        t.standardError = FileHandle.nullDevice
-        try? t.run()
-        t.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let obj = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return "" }
-        return (obj["VolumeName"] as? String) ?? ""
+        infoOf(bsd)["VolumeName"] as? String ?? ""
     }
 
     // 枚举外接盘上的可接管分区 (NTFS/exFAT/ext* 等)
