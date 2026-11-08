@@ -80,6 +80,9 @@ done
     echo '  log level = 1'
     echo '  load printers = no'
     echo '  disable netbios = yes'
+    # smbd 默认会经 avahi 自注册 _smb._tcp (NetBIOS 名大写 ANYFS),
+    # 与已挂载条目 anyFS.local 在 Finder Network 双份显示; 主机名 A 记录由 avahi 宣告不受影响
+    echo '  multicast dns register = no'
     echo '  smb ports = 445'
     echo '  use sendfile = yes'
     echo '  socket options = TCP_NODELAY SO_RCVBUF=262144 SO_SNDBUF=262144'

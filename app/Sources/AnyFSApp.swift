@@ -265,7 +265,7 @@ struct MenuPanel: View {
                 Image(nsImage: img)
                     .resizable()
                     .renderingMode(.template)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 26, height: 26)
                     .foregroundStyle(
                         LinearGradient(colors: [Color(red: 0.38, green: 0.68, blue: 1.0),
                                                 Color(red: 0.18, green: 0.45, blue: 0.95)],

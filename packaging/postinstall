@@ -20,8 +20,9 @@ mkdir -p /Library/PrivilegedHelperTools /usr/local/etc
 cp "$RES/daemon/anyfsd" "$BIN"
 chmod 755 "$BIN"
 
+case "$(uname -m)" in arm64) QB=qemu-system-aarch64;; *) QB=qemu-system-x86_64;; esac
 cat > /usr/local/etc/anyfsd.conf <<EOF
-QEMU=$RES/qemu/bin/qemu-system-aarch64
+QEMU=$RES/qemu/bin/$QB
 KERNEL=$RES/guest/vmlinuz-virt
 INITRD=$RES/guest/initramfs-virt
 ISO=$RES/guest/alpine-virt.iso

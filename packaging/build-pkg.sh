@@ -3,7 +3,7 @@
 # 用法: ./build-pkg.sh [版本号, 默认 0.1]   (普通用户)
 set -e
 set -o pipefail
-ROOT=/Users/jack/Documents/anyfs
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-0.1}"
 STAGE_PKG=$ROOT/packaging/pkg-stage
 SCRIPTS=$ROOT/packaging/pkg-scripts

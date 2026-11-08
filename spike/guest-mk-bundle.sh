@@ -1,13 +1,13 @@
 #!/bin/bash
 # guest-mk-bundle.sh — 在 guest 中将 bundle.img 格式化为 ext2 并填入 rootfs
 # 流程: QEMU(slirp网络) → apk add e2fsprogs → mke2fs /dev/vdb → 挂载
-#       → apk --root 直装 aarch64 包 (samba/ntfs-3g-progs/avahi/dbus) → 删 musl
+#       → apk --root 直装包 (samba/ntfs-3g-progs/avahi/dbus, 架构随 live 系统) → 删 musl
 #       → wget host 的 init.sh → sync 卸载 → 关VM
 # 用法: ./guest-mk-bundle.sh   (HVF 无需 root)
 set -e
 cd "$(dirname "$0")"
 
-QEMU=/Users/jack/Documents/anyfs/spike/qemu-11.1.2/build/qemu-system-aarch64
+. "$(dirname "$0")/qemu-env.sh"   # QEMU/MACHINE/CONSOLE 按架构自动选择
 PIPE=serial-mkb
 
 # bundle.img 不存在则创建 (192MB ext2 空盘, guest 内格式化)
@@ -26,11 +26,11 @@ sleep 1
 trap 'kill $CATPID $QEMUPID $HTTPPID 2>/dev/null' EXIT
 
 "$QEMU" \
-    -machine virt,accel=hvf \
+    -machine "$MACHINE" \
     -cpu host -smp 2 -m 512 \
     -kernel alpine/vmlinuz-virt \
     -initrd alpine/initramfs-virt \
-    -append "console=ttyAMA0" \
+    -append "console=$CONSOLE" \
     -drive file=alpine/alpine-virt.iso,format=raw,if=virtio,readonly=on \
     -drive file=bundle/bundle.img,format=raw,if=virtio \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \

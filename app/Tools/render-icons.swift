@@ -12,7 +12,7 @@ func drawGlyph(_ ctx: CGContext, _ S: CGFloat, color: CGColor) {
     ctx.setLineJoin(.round)
 
     // SSD 轮廓
-    let lw = S * 0.082
+    let lw = S * 0.098
     ctx.setLineWidth(lw)
     let inset = S * 0.13
     let rect = CGRect(x: inset, y: inset, width: S - 2 * inset, height: S - 2 * inset)
@@ -21,7 +21,7 @@ func drawGlyph(_ ctx: CGContext, _ S: CGFloat, color: CGColor) {
     ctx.strokePath()
 
     // 双向箭头: 上 → (读), 下 ← (写)
-    let alw = S * 0.070
+    let alw = S * 0.084
     ctx.setLineWidth(alw)
     let cy1 = S * 0.605, cy2 = S * 0.395
     let x1 = S * 0.30, x2 = S * 0.70

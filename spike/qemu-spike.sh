@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 
-QEMU=/Users/jack/Documents/anyfs/spike/qemu-11.1.2/build/qemu-system-aarch64
+. "$(dirname "$0")/qemu-env.sh"   # QEMU/MACHINE/CONSOLE 按架构自动选择
 PIPE=serial
 
 diskutil unmountDisk /dev/disk2 2>/dev/null || true
@@ -16,11 +16,11 @@ mkfifo ${PIPE}.in ${PIPE}.out
 cat ${PIPE}.out > qemu-serial.log &
 
 "$QEMU" \
-    -machine virt,accel=hvf \
+    -machine "$MACHINE" \
     -cpu host -smp 2 -m 512 \
     -kernel alpine/vmlinuz-virt \
     -initrd alpine/initramfs-virt \
-    -append "console=ttyAMA0" \
+    -append "console=$CONSOLE" \
     -drive file=alpine/alpine-virt.iso,format=raw,if=virtio,readonly=on \
     -device virtio-scsi-pci,id=scsi0 \
     -drive file=/dev/rdisk2,format=raw,if=none,id=usbdisk,discard=unmap \

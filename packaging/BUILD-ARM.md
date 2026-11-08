@@ -63,37 +63,27 @@ make -j$(sysctl -n hw.ncpu)
 # 网络慢可换清华镜像: mirrors.tuna.tsinghua.edu.cn/alpine/v3.21/releases/aarch64/
 ```
 
-bundle 重建（二选一）：
-- **推荐**：在 ARM Mac 上直接跑 `guest-mk-bundle.sh`（QEMU aarch64 + aarch64 ISO），
-  apk 仓库换 aarch64 路径：`.../alpine/v3.21/main/aarch64/`
-  rootfs 里的 amd64 二进制要全部换 aarch64 版（smbd/avahi/ntfs-3g 及其依赖；
-  **x86 版 apk 清单不在 git 里**, 在本机 `spike/bundle/apks/` 目录, 去 ARM 前把整个
-  anyfs 工作目录拷过去, 或在 ARM 上按清单从 aarch64 仓库逐个重新下载解包）
-- 或找一台 ARM Linux 机器/云主机跑同样的 bundle 制作流程，把 bundle.img 拷回来
+bundle 重建：在构建机上直接跑 `sudo ./spike/guest-mk-bundle.sh` 即可——
+guest 内 `apk --root` 按 live 系统架构自动拉对应包（samba/ntfs-3g-progs/avahi/dbus），
+musl 清理按通配符匹配，两个平台零差异。（旧的 rootfs/ 目录 + bundle.tar.gz 流程已废弃，
+仅 init.sh 仍从 `spike/bundle/rootfs/init.sh` 取用）
 
-**注意**：spike 脚本（`guest-mk-bundle.sh` / `guest-part.sh`）有三处 x86 硬编码，
-在 ARM 上跑之前每个脚本都要改：QEMU 路径指向 `qemu-system-aarch64`、
-`-machine q35,accel=hvf` → `-machine virt,accel=hvf`、`console=ttyS0` → `console=ttyAMA0`。
+**注意**：spike 脚本已参数化——各脚本统一 source `spike/qemu-env.sh`，
+按 `uname -m` 自动选择 QEMU 二进制 / 机器类型（q35↔virt）/ 串口（ttyS0↔ttyAMA0），
+两个平台同一份脚本，无需手改。
 
 **init.sh 无需改动**（blkid/挂载/smbd 全部架构无关）。
 
 ## 4. 打包脚本差异
 
-```bash
-# collect-qemu.sh 需小改 (做成参数):
-QEMU_SRC=.../build/qemu-system-aarch64
-FW_FILES=""        # -kernel 直启时 ARM 不需要固件文件; 用 edk2 则收集 edk2-aarch64-code.fd
-# 依赖前缀已参数化: ARM/Homebrew 下 DEP_PREFIX=/opt/homebrew ./collect-qemu.sh
-# daemon Config.loadOverrides 已支持 conf 指定路径, 无需改代码
-```
+打包脚本已全部参数化，两个平台同一份代码、零手改：
 
-注意 collect-qemu.sh 里 `qemu-system-x86_64` 不止 QEMU_SRC 一处：stage 落地路径、
-otool/install_name_tool/codesign 各步、以及**末尾的端到端冒烟测试**都写死了文件名，
-冒烟测试的 `-machine q35,accel=hvf` 也要改成 `virt,accel=hvf`。
-建议把二进制名抽成 `QEMU_BIN=qemu-system-aarch64` 变量全文引用。
-
-assemble-app.sh / install-daemon-from-app.sh / postinstall / build-pkg.sh 无需改动
-（SIGN_ID、entitlements、自检全部架构无关）。
+- `collect-qemu.sh`：按 `uname -m` 自动选择 `QEMU_BIN`（x86_64/aarch64）、冒烟机器类型
+  （q35↔virt）、固件集（x86=BIOS 8 件；ARM=仅 efi-virtio.rom/pxe-virtio.rom 两个 option ROM）、
+  依赖前缀默认值（Intel=/opt/local, ARM=/opt/homebrew，均可用 `DEP_PREFIX=` 覆盖）
+- `assemble-app.sh` / `build-pkg.sh` / `install-daemon-from-app.sh` / `postinstall`：
+  ROOT 由脚本位置自动推导（不再写死路径）；anyfsd.conf 的 QEMU 路径按目标机 `uname -m` 生成
+- daemon `Config.loadOverrides` 已支持 conf 指定路径，无需改代码
 
 ## 5. 预期性能（为什么要做 ARM 包）
 
