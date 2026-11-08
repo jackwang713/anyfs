@@ -33,7 +33,10 @@ echo "已收集 $(ls "$FWDEST" | wc -l | tr -d ' ') 个固件文件"
 
 is_sys() { case "$1" in /usr/lib/*|/System/*) return 0;; *) return 1;; esac }
 
-# BFS 收集依赖闭包 (只收 /opt/local 的 MacPorts 库), bash 3.2 兼容 (无关联数组)
+# 第三方依赖前缀: Intel 构建机用 MacPorts (/opt/local), ARM 用 Homebrew (/opt/homebrew)
+DEP_PREFIX="${DEP_PREFIX:-/opt/local}"
+
+# BFS 收集依赖闭包 (收所有非系统库, 前缀无关; 只有下面两处 install_name_tool 按前缀过滤)
 SEEN="$STAGE/.seen"
 : > "$SEEN"
 queue=("$QDEST/bin/qemu-system-x86_64")
@@ -61,13 +64,13 @@ echo "已收集 $COUNT 个依赖库"
 for lib in "$LIBDEST"/*.dylib; do
     base=$(basename "$lib")
     install_name_tool -id "@loader_path/$base" "$lib"
-    for dep in $(otool -L "$lib" | awk 'NR>1{print $1}' | grep '^/opt/local'); do
+    for dep in $(otool -L "$lib" | awk 'NR>1{print $1}' | grep "^$DEP_PREFIX"); do
         install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "$lib"
     done
 done
 
 # 重写 qemu 主二进制: /opt/local/lib/libX → @executable_path/../lib/libX
-for dep in $(otool -L "$QDEST/bin/qemu-system-x86_64" | awk 'NR>1{print $1}' | grep '^/opt/local'); do
+for dep in $(otool -L "$QDEST/bin/qemu-system-x86_64" | awk 'NR>1{print $1}' | grep "^$DEP_PREFIX"); do
     install_name_tool -change "$dep" "@executable_path/../lib/$(basename "$dep")" "$QDEST/bin/qemu-system-x86_64"
 done
 

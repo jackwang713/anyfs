@@ -11,7 +11,7 @@ Intel 版打包流程见 `packaging/` 各脚本注释及 `ntfs-bridge-app-plan.m
 | guest 形态 | `-machine q35` + SeaBIOS | **`-machine virt`** + UEFI(edk2) 或 `-kernel` 直启 | ARM 无 q35/SeaBIOS |
 | Alpine guest | x86_64 内核/initrd/ISO | **aarch64** 内核/initrd/ISO | **Apple Silicon 的 HVF 只能虚拟化 ARM guest** |
 | bundle.img | x86_64 smbd/ntfs-3g 等 | **aarch64 版**（apk 从 aarch64 仓库拉） | guest 用户态架构随内核 |
-| MacPorts 前缀 | /opt/local | /opt/local（ARM 版 MacPorts 同路径；若用 Homebrew 则是 /opt/homebrew） | collect-qemu.sh 需参数化 |
+| 包管理 | MacPorts（brew 已停 macOS 13 bottle） | **Homebrew**（ARM 全量 bottle，无需 MacPorts） | collect-qemu.sh 已用 DEP_PREFIX 参数化 |
 | TRIM 补丁 | file-posix.c DKIOCUNMAP | **同一份补丁直接适用**（`__APPLE__` 守卫，与 CPU 架构无关） | spike/patches/ |
 | 签名/entitlements/dylib 收集/pkg | 同一套脚本 | 同一套脚本 | 无差异 |
 
@@ -25,10 +25,19 @@ qemu 源码树不在 git 仓库里（太大），ARM 机器上需重新下载 11
 ```bash
 # 源码下载 (清华 MacPorts distfiles 镜像实测 41.6MB/s, 或 qemu.org):
 #   https://mirrors.tuna.tsinghua.edu.cn/macports/distfiles/qemu/qemu-11.1.2.tar.xz
-# 依赖与编译选项的完整版见 ntfs-bridge-app-plan.md 第十一节"编译 QEMU 11.1.2"
-# (MacPorts clang-17 / CLT python3 / --enable-hvf --enable-slirp 等), ARM 只需改 target:
+
+# ARM 上用 Homebrew 装构建依赖即可, 不需要 MacPorts:
+brew install meson ninja pkg-config glib pixman libslirp
+# ARM Mac 的 macOS ≥14, CLT clang 够新 — Intel 机上"clang-17 太老"的坑不存在,
+# --cc/--cxx/--objcc 三个参数可省; conda python 的坑同理, 确认 /usr/bin/python3 优先即可
+
+# 编译 (完整选项说明见 ntfs-bridge-app-plan.md 第十一节"编译 QEMU 11.1.2"):
 git apply spike/patches/qemu-11.1.2-macos-dkiocunmap-trim.patch   # 在解压的 qemu-11.1.2 里 patch -p1
-./configure --target-list=aarch64-softmmu ...                     # 其余选项照抄 plan 文档
+./configure --target-list=aarch64-softmmu --enable-hvf --enable-slirp \
+    --disable-docs --disable-gtk --disable-sdl --disable-cocoa \
+    --disable-spice --disable-usb-redir --disable-opengl \
+    --disable-guest-agent --disable-xen
+make -j$(sysctl -n hw.ncpu)
 ```
 
 验证：`-machine virt,accel=hvf` 起得来（冒烟脚本同 Intel，见 collect-qemu.sh 端到端段）。
@@ -74,7 +83,7 @@ bundle 重建（二选一）：
 # collect-qemu.sh 需小改 (做成参数):
 QEMU_SRC=.../build/qemu-system-aarch64
 FW_FILES=""        # -kernel 直启时 ARM 不需要固件文件; 用 edk2 则收集 edk2-aarch64-code.fd
-# MacPorts 前缀 /opt/local 不变; 若依赖来自 Homebrew 则 /opt/local → /opt/homebrew
+# 依赖前缀已参数化: ARM/Homebrew 下 DEP_PREFIX=/opt/homebrew ./collect-qemu.sh
 # daemon Config.loadOverrides 已支持 conf 指定路径, 无需改代码
 ```
 
