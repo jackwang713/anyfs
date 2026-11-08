@@ -20,10 +20,15 @@ Intel 版打包流程见 `packaging/` 各脚本注释及 `ntfs-bridge-app-plan.m
 
 ## 1. QEMU (aarch64)
 
+qemu 源码树不在 git 仓库里（太大），ARM 机器上需重新下载 11.1.2 源码再编译：
+
 ```bash
-# ARM Mac 上同样走 MacPorts 依赖 + 源码编译 (补丁通用):
+# 源码下载 (清华 MacPorts distfiles 镜像实测 41.6MB/s, 或 qemu.org):
+#   https://mirrors.tuna.tsinghua.edu.cn/macports/distfiles/qemu/qemu-11.1.2.tar.xz
+# 依赖与编译选项的完整版见 ntfs-bridge-app-plan.md 第十一节"编译 QEMU 11.1.2"
+# (MacPorts clang-17 / CLT python3 / --enable-hvf --enable-slirp 等), ARM 只需改 target:
 git apply spike/patches/qemu-11.1.2-macos-dkiocunmap-trim.patch   # 在解压的 qemu-11.1.2 里 patch -p1
-./configure --target-list=aarch64-softmmu --enable-hvf ...        # 其余选项同 spike/build.sh
+./configure --target-list=aarch64-softmmu ...                     # 其余选项照抄 plan 文档
 ```
 
 验证：`-machine virt,accel=hvf` 起得来（冒烟脚本同 Intel，见 collect-qemu.sh 端到端段）。
@@ -44,17 +49,22 @@ git apply spike/patches/qemu-11.1.2-macos-dkiocunmap-trim.patch   # 在解压的
 ## 3. Alpine aarch64 guest
 
 ```bash
-# 下载 (清华镜像):
-https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.21/releases/aarch64/alpine-virt-3.21.x-aarch64.iso
-# 抽取 vmlinuz-virt / initramfs-virt (aarch64)
+# spike/build.sh 已按 uname -m 自动选架构, ARM 机器上直接跑即可:
+./spike/build.sh   # 下载 alpine-virt-3.21.3-aarch64.iso 并抽取内核/initrd
+# 网络慢可换清华镜像: mirrors.tuna.tsinghua.edu.cn/alpine/v3.21/releases/aarch64/
 ```
 
 bundle 重建（二选一）：
 - **推荐**：在 ARM Mac 上直接跑 `guest-mk-bundle.sh`（QEMU aarch64 + aarch64 ISO），
   apk 仓库换 aarch64 路径：`.../alpine/v3.21/main/aarch64/`
-  rootfs 里的 amd64 二进制要全部换 aarch64 版（smbd/avahi/ntfs-3g 及其依赖，
-  重新按 spike/bundle/apks 的清单从 aarch64 仓库下载解包）
+  rootfs 里的 amd64 二进制要全部换 aarch64 版（smbd/avahi/ntfs-3g 及其依赖；
+  **x86 版 apk 清单不在 git 里**, 在本机 `spike/bundle/apks/` 目录, 去 ARM 前把整个
+  anyfs 工作目录拷过去, 或在 ARM 上按清单从 aarch64 仓库逐个重新下载解包）
 - 或找一台 ARM Linux 机器/云主机跑同样的 bundle 制作流程，把 bundle.img 拷回来
+
+**注意**：spike 脚本（`guest-mk-bundle.sh` / `guest-part.sh`）有三处 x86 硬编码，
+在 ARM 上跑之前每个脚本都要改：QEMU 路径指向 `qemu-system-aarch64`、
+`-machine q35,accel=hvf` → `-machine virt,accel=hvf`、`console=ttyS0` → `console=ttyAMA0`。
 
 **init.sh 无需改动**（blkid/挂载/smbd 全部架构无关）。
 
@@ -67,6 +77,11 @@ FW_FILES=""        # -kernel 直启时 ARM 不需要固件文件; 用 edk2 则�
 # MacPorts 前缀 /opt/local 不变; 若依赖来自 Homebrew 则 /opt/local → /opt/homebrew
 # daemon Config.loadOverrides 已支持 conf 指定路径, 无需改代码
 ```
+
+注意 collect-qemu.sh 里 `qemu-system-x86_64` 不止 QEMU_SRC 一处：stage 落地路径、
+otool/install_name_tool/codesign 各步、以及**末尾的端到端冒烟测试**都写死了文件名，
+冒烟测试的 `-machine q35,accel=hvf` 也要改成 `virt,accel=hvf`。
+建议把二进制名抽成 `QEMU_BIN=qemu-system-aarch64` 变量全文引用。
 
 assemble-app.sh / install-daemon-from-app.sh / postinstall / build-pkg.sh 无需改动
 （SIGN_ID、entitlements、自检全部架构无关）。
