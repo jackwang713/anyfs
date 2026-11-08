@@ -681,6 +681,8 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 
 **机制**：通用剪贴板把 ⌘C 的文件**完整暂存**到该目录供其他设备拉取，useractivityd 本应自动清理但存在泄漏（取消/中断的传输不被回收；也未注册进 macOS CacheDelete 磁盘压力清理名单）。同类案例：mole issue #1178 整理电影飙 300GB、Apple 社区 370GB。**苹果官方无文档无开关**（[官方储存空间文档](https://support.apple.com/zh-cn/102624)对"系统数据"只有一句"通用类别"）。
 
+**目录因 macOS 版本而异**（实测）：macOS 15 在 `~/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard`（不自动清理，会积累成灾）；macOS 13 在 `$TMPDIR/com.apple.useractivityd/shared-pasteboard`（即 `/var/folders/.../T/` 下，系统约 3 天自动清 + 重启清，基本无泄漏风险）。通用定位法：`defaults read com.apple.coreservices.useractivityd` 打出的 `kLocalPasteboardBlobName`/`kRemotePasteboardBlobName` 即实际路径。
+
 **处理**：`rm -rf ~/Library/Group\ Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/*`（安全，系统下次传输自动重建；建议只清 1 小时前的条目以免切断进行中的同步）。日常清理工具：[Mole](https://github.com/tw93/mole)（`brew install mole`，开源，源码含该目录的 1 小时安全闸清理）；腾讯柠檬不覆盖此目录。
 
 #### 对本项目的启示（backlog）
