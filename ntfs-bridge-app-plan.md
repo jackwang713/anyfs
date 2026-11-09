@@ -625,6 +625,8 @@ anyfsctl eject   → 三段式干净退出, QEMU code=0
 
 注意：只探测 init.sh 挂载白名单内的类型（ntfs/exfat/vfat/ext4）；btrfs/xfs 魔数可识别但 guest 未启用挂载，不列出。
 
+**踩坑：macOS 裸盘字符设备（/dev/rdiskN）的 pread 要求偏移和长度都按扇区（512）对齐**，否则直接返回失败且不报错——首版探测按精确偏移读 2 字节魔数全部静默失败，表现为"盘在列表里消失"。修法：读所在扇区再切片。验证工具：伪镜像文件测切片逻辑（文件无对齐限制）+ FDA 终端 `sudo swift` 实测真机裸盘。
+
 ### S6 打包管线（2026-11-07，自包含包已跑通）
 
 产物：`AnyFS.app`（321MB 全自包含，bundle.img 192M + Alpine ISO 60M + QEMU 45M）。脚本在 `packaging/`：`collect-qemu.sh`（依赖收集+固件+签名+自检）、`assemble-app.sh`（一键组包）、`install-daemon-from-app.sh`（pkg postinstall 原型，写 /usr/local/etc/anyfsd.conf 覆盖资产路径，daemon 已支持 conf 覆盖）。

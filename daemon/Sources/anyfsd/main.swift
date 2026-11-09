@@ -413,8 +413,14 @@ final class DiskManager {
         guard fd >= 0 else { return nil }
         defer { close(fd) }
         func at(_ off: Int64, _ len: Int) -> [UInt8]? {
-            var buf = [UInt8](repeating: 0, count: len)
-            return pread(fd, &buf, len, off) == len ? buf : nil
+            // 裸盘字符设备要求偏移和长度都按扇区 (512) 对齐, 否则 pread 直接失败
+            let sector: Int64 = 512
+            let start = off / sector * sector
+            let total = Int((off + Int64(len) + sector - 1) / sector * sector - start)
+            var buf = [UInt8](repeating: 0, count: total)
+            guard pread(fd, &buf, total, start) == total else { return nil }
+            let s = Int(off - start)
+            return Array(buf[s..<(s + len)])
         }
         if let m = at(3, 8) {
             if m == Array("EXFAT   ".utf8) { return ("exfat", "") }
