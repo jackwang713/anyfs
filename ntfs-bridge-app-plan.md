@@ -611,6 +611,20 @@ anyfsctl eject   → 三段式干净退出, QEMU code=0
 - **配置定稿**：2 核 / 128MB 默认，不做开机启动，设置页留待后续版本
 - **遗留 backlog**：QMP 热插拔消除增删分区时的 VM 重启（~15s 中断）；设置页（内存/CPU 档位）
 
+### S5.2 整盘无分区表 (superfloppy) 支持（2026-11-09）✅
+
+场景：Linux 侧 `mkfs.ext4 /dev/sdX` 直接格整盘的 U 盘（无 GPT/MBR），macOS `diskutil` 完全无感知（Content=None、无分区节点、无 fs 类型），App 列表看不到。
+
+| 改动 | 说明 |
+|---|---|
+| 整盘枚举 | `listAvailable` 对"无 Partitions 且 Content 为空"的外接盘加魔数探测分支 |
+| **魔数探测 `probeWholeDisk`** | daemon 是 root 直接读 `/dev/rdiskN` 固定偏移签名（与 blkid 同原理，确定性识别非猜测）：ext4 超块 @1080=0x53EF + 卷标 @+120(16B)、NTFS/exFAT @3、FAT32 @82/FAT16 @16；结果（含"不支持"）缓存，随 DA 变更失效——不缓存会每次枚举都真读盘闪灯 |
+| takeover 放行整盘 | 校验 `^disk\d+(s\d+)?$`；partLabels 卷标回退链 diskutil→探测缓存→bsd |
+| unmount/remount 跳过整盘 | macOS 本就挂不了，无需压制/挂回 |
+| guest 侧零改动 | S5 已验证整盘形态（init.sh 探测 `/dev/sd[a-z]`） |
+
+注意：只探测 init.sh 挂载白名单内的类型（ntfs/exfat/vfat/ext4）；btrfs/xfs 魔数可识别但 guest 未启用挂载，不列出。
+
 ### S6 打包管线（2026-11-07，自包含包已跑通）
 
 产物：`AnyFS.app`（321MB 全自包含，bundle.img 192M + Alpine ISO 60M + QEMU 45M）。脚本在 `packaging/`：`collect-qemu.sh`（依赖收集+固件+签名+自检）、`assemble-app.sh`（一键组包）、`install-daemon-from-app.sh`（pkg postinstall 原型，写 /usr/local/etc/anyfsd.conf 覆盖资产路径，daemon 已支持 conf 覆盖）。

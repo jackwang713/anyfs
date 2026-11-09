@@ -198,6 +198,8 @@ final class QEMUManager {
     // 只卸选中的分区 (不可用 unmountDisk 整盘 — 会波及留给 macOS 的 APFS 等分区)
     private func unmountTargetsSync() {
         for part in partitions {
+            // 整盘 (superfloppy) macOS 本就挂载不了, 无需压制
+            guard part.range(of: #"s\d+$"#, options: .regularExpression) != nil else { continue }
             let t = Process()
             t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
             t.arguments = ["unmount", "force", "/dev/\(part)"]
@@ -389,6 +391,48 @@ final class DiskManager {
     // 分区 (ext4 等) 每次 info 都会触发真实介质探测读 (U盘灯闪的元凶), 必须缓存;
     // 插拔/属性变更 (重格式化) 时经 DA 回调整体失效
     private var infoCache: [String: [String: Any]] = [:]
+    // 整盘 (superfloppy, 无分区表) 探测出的卷标缓存, 随 infoCache 一并失效
+    private var wholeDiskLabels: [String: String] = [:]
+    // 整盘探测结果缓存 (fs 为空串 = 已探测但不支持): 探测要真读盘, 不缓存会每次枚举都闪灯
+    private var wholeDiskProbe: [String: (fs: String, label: String)] = [:]
+
+    // 整盘文件系统魔数探测 — 无分区表的盘 macOS 完全无感知 (Content=None),
+    // daemon 是 root 直接读裸盘固定偏移签名 (与 Linux blkid 同原理, 确定性识别非猜测);
+    // 只识别 guest init.sh 支持的类型; 结果含"不支持"也缓存 (fs="")
+    private func probeWholeDisk(_ bsd: String) -> (fs: String, label: String)? {
+        lock.lock()
+        if let c = wholeDiskProbe[bsd] { lock.unlock(); return c.fs.isEmpty ? nil : c }
+        lock.unlock()
+        let result = probeWholeDiskUncached(bsd) ?? ("", "")
+        lock.lock(); wholeDiskProbe[bsd] = result; lock.unlock()
+        return result.fs.isEmpty ? nil : result
+    }
+
+    private func probeWholeDiskUncached(_ bsd: String) -> (fs: String, label: String)? {
+        let fd = open("/dev/r\(bsd)", O_RDONLY | O_NONBLOCK)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        func at(_ off: Int64, _ len: Int) -> [UInt8]? {
+            var buf = [UInt8](repeating: 0, count: len)
+            return pread(fd, &buf, len, off) == len ? buf : nil
+        }
+        if let m = at(3, 8) {
+            if m == Array("EXFAT   ".utf8) { return ("exfat", "") }
+            if m == Array("NTFS    ".utf8) { return ("ntfs", "") }
+        }
+        if let m = at(82, 8), m == Array("FAT32   ".utf8) { return ("msdos", "") }
+        if let m = at(16, 8), m == Array("FAT16   ".utf8) { return ("msdos", "") }
+        // ext2/3/4: 超级块在偏移 1024, 魔数 0x53EF 在 +56, 卷标在 +120 (16 字节, NUL 填充)
+        if let m = at(1080, 2), m == [0x53, 0xEF] {
+            var label = ""
+            if let raw = at(1144, 16) {
+                let bytes = raw.prefix { $0 != 0 }
+                label = String(decoding: bytes, as: UTF8.self)
+            }
+            return ("ext4", label)
+        }
+        return nil
+    }
 
     // 为 App 预建 SMB 挂载点: /Volumes 是 root:wheel 普通用户不可建,
     // 由 daemon (root) 创建并 chown 给当前登录用户, App 随后以用户身份 mount_smbfs
@@ -465,7 +509,7 @@ final class DiskManager {
     }
 
     private func invalidateInfoCache(_ reason: String) {
-        lock.lock(); infoCache.removeAll(); lock.unlock()
+        lock.lock(); infoCache.removeAll(); wholeDiskLabels.removeAll(); wholeDiskProbe.removeAll(); lock.unlock()
         log("枚举缓存已清空 (\(reason))")
     }
 
@@ -559,7 +603,30 @@ final class DiskManager {
               let disks = obj["AllDisksAndPartitions"] as? [[String: Any]] else { return out }
         lock.lock(); let active = activeParts; lock.unlock()
         for d in disks {
-            guard let parts = d["Partitions"] as? [[String: Any]] else { continue }
+            let parts = d["Partitions"] as? [[String: Any]] ?? []
+            // 整盘文件系统 (superfloppy): 无 Partitions 且 Content 为空 — macOS 无法识别,
+            // 读魔数探测; 有分区表的盘 (哪怕分区都不可接管) 不探测, 避免整盘/分区双列
+            if parts.isEmpty {
+                let dContent = d["Content"] as? String ?? ""
+                guard dContent.isEmpty,
+                      let bsd = d["DeviceIdentifier"] as? String,
+                      let size = d["Size"] as? Int, size > 0,
+                      let probe = probeWholeDisk(bsd) else { continue }
+                lock.lock()
+                if !probe.label.isEmpty { wholeDiskLabels[bsd] = probe.label }
+                lock.unlock()
+                out.append([
+                    "bsd": bsd,
+                    "label": probe.label.isEmpty ? "\(modelOf(bsd)) 整盘" : probe.label,
+                    "fs": probe.fs,
+                    "disk": bsd,
+                    "model": modelOf(bsd),
+                    "sizeGB": String(format: "%.1f", Double(size) / 1e9),
+                    "mounted": false,
+                    "active": active.contains(bsd),
+                ])
+                continue
+            }
             for p in parts {
                 guard let bsd = p["DeviceIdentifier"] as? String else { continue }
                 let fs = (p["FilesystemType"] as? String ?? "").lowercased()
@@ -593,8 +660,8 @@ final class DiskManager {
     // 显式接管选中分区. 已在服务且集合不同 → 先干净释放再起新 VM
     func takeover(_ parts: [String], reply: @escaping (String) -> Void) {
         DispatchQueue(label: "takeover").async {
-            // 基本校验
-            let valid = parts.filter { $0.range(of: #"^disk\d+s\d+$"#, options: .regularExpression) != nil }
+            // 基本校验 (diskNsM 分区 或 diskN 整盘)
+            let valid = parts.filter { $0.range(of: #"^disk\d+(s\d+)?$"#, options: .regularExpression) != nil }
             guard !valid.isEmpty, valid.count == parts.count else {
                 reply("failed: 分区名不合法 \(parts)")
                 return
@@ -620,7 +687,8 @@ final class DiskManager {
             // 共享名只出 ASCII: mount_smbfs 的 URL 解析器不接受非 ASCII, smbutil 枚举也会崩;
             // 非 ASCII 卷标回退用 bsd 设备名 (UI 仍显示真卷标, 共享名是内部细节)
             q.partLabels = Dictionary(uniqueKeysWithValues: parts.map { part in
-                let label = self.volumeNameOf(part)
+                let diskutilLabel = self.volumeNameOf(part)
+                let label = diskutilLabel.isEmpty ? (self.wholeDiskLabels[part] ?? "") : diskutilLabel
                 let asciiOK = !label.isEmpty && label.allSatisfy { $0.isASCII }
                 return (part, asciiOK ? label : part)
             })
@@ -654,6 +722,8 @@ final class DiskManager {
 
     private func remountToMacOS(_ parts: [String]) {
         for part in parts {
+            // 整盘 (superfloppy) macOS 挂不了, 无需挂回
+            guard part.range(of: #"s\d+$"#, options: .regularExpression) != nil else { continue }
             log("交还 macOS: diskutil mount /dev/\(part)")
             let t = Process()
             t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
