@@ -78,10 +78,13 @@ if [ "$((LEN * BS))" -ge 2097152 ]; then
     echo "== 3.5/5 对照组: guest 块层直发 blkdiscard 1MB (绕过文件系统) =="
     # QMP qemu-io 在 QEMU 11 已移除 (CommandNotFound 踩过) → 改用 guest blkdiscard;
     # -f = 挂载中强制; 目标是 FIEMAP+预校验过的图案区, 安全; busybox blkdiscard 支持 -f
-    # /proc/mounts 反查设备名 (findmnt 在 busybox 不一定有)
-    printf 'D=$(awk -v m=/mnt/%s "\$2==m{print \$1}" /proc/mounts); blkdiscard -f -o %s -l 1048576 $D; echo CTRL-DONE-%s rc=$?\n' \
+    # time 计时 + rc 回显 (控制台可见): blkdiscard 若阻塞 ~30s → 延迟在 QEMU/宿主 ioctl;
+    # 若秒回但归零延迟 → 延迟在桥/FTL 销账; rc≠0 → busybox 不支持 -f 等, 看控制台
+    printf 'D=$(awk -v m=/mnt/%s "\$2==m{print \$1}" /proc/mounts); echo CTRL-DEV=$D; time blkdiscard -f -o %s -l 1048576 $D; echo CTRL-DONE-%s rc=$?\n' \
         "$SHARE" "$OFF" "$MARK" > "$PIPE.in"
     wait_marker "CTRL-DONE-$MARK" 30
+    # 把控件输出打进测试日志 (含 time 三段计时)
+    anyfsctl console | awk '/CTRL-DEV/{n=NR} {buf[NR]=$0} END{for(i=n;i<=NR;i++) print buf[i]}' | head -12
     sleep 2
     ./unmap-live "/dev/r$PART" --verify "$OFF"
     VOFF=$((OFF + 1048576))   # 第 5 步改看后 1MB (guest 删除路径的窗口)
