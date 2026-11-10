@@ -92,10 +92,13 @@ fi
 
 if [ "$FAST" = 1 ]; then
     echo "== 4/5 guest 删除 (在线 discard, 不全量 fstrim) =="
-    printf 'rm -f /mnt/%s/.deep-trim-pattern; sync; echo DEEP:DELETE-DONE-%s\n' "$SHARE" "$MARK" > "$PIPE.in"
+    T_DEL=$SECONDS
+    # DEL-BEGIN/DELETE-DONE 双标记: 测 rm 在 guest 内是否阻塞 (discard 同步等完成?)
+    printf 'echo DEL-BEGIN-%s; rm -f /mnt/%s/.deep-trim-pattern; sync; echo DEEP:DELETE-DONE-%s\n' "$MARK" "$SHARE" "$MARK" > "$PIPE.in"
 else
     echo "== 4/5 guest 删除 + 全量 fstrim =="
-    printf 'rm -f /mnt/%s/.deep-trim-pattern; sync; fstrim -v /mnt/%s; echo DEEP:FSTRIM-DONE-%s\n' "$SHARE" "$SHARE" "$MARK" > "$PIPE.in"
+    T_DEL=$SECONDS
+    printf 'echo DEL-BEGIN-%s; rm -f /mnt/%s/.deep-trim-pattern; sync; fstrim -v /mnt/%s; echo DEEP:FSTRIM-DONE-%s\n' "$MARK" "$SHARE" "$SHARE" "$MARK" > "$PIPE.in"
 fi
 
 # QMP unmap_ops 打点: UNMAP 离开 QEMU 的时刻 vs NAND 归零的时刻, 切分延迟归属
@@ -107,9 +110,15 @@ qmp_ops() {
 OPS0=$(qmp_ops); OPS0=${OPS0:-0}
 
 if [ "$FAST" = 1 ]; then
+    wait_marker "DEL-BEGIN-$MARK" 15
+    echo "  [打点] DEL-BEGIN 到达: 注入后 $((SECONDS - T_DEL))s"
     wait_marker "DEEP:DELETE-DONE-$MARK" 60
+    echo "  [打点] DELETE-DONE 到达: 注入后 $((SECONDS - T_DEL))s (rm+sync 在 guest 内的耗时)"
 else
+    wait_marker "DEL-BEGIN-$MARK" 15
+    echo "  [打点] DEL-BEGIN 到达: 注入后 $((SECONDS - T_DEL))s"
     wait_marker "DEEP:FSTRIM-DONE-$MARK" 600
+    echo "  [打点] FSTRIM-DONE 到达: 注入后 $((SECONDS - T_DEL))s"
 fi
 
 echo "== 5/5 宿主 F_NOCACHE 读回判决 + QMP 打点 =="
