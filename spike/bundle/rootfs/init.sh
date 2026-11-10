@@ -57,7 +57,9 @@ for part in /dev/sd[a-z][0-9]* /dev/sd[a-z]; do
                 || echo "BRIDGE-MOUNT ntfs $part $name FAIL"
             ;;
         exfat|vfat)
-            mount -t "$TYPE" "$part" "$mp" 2>/dev/null \
+            # -o discard: 在线养护 (与 ntfs3/ext4 一致, 删除即 TRIM);
+            # fstrim 保留为补充手段 (修复历史删除的死块)
+            mount -t "$TYPE" -o discard "$part" "$mp" 2>/dev/null \
                 && { fstrim "$mp" >/dev/null 2>&1; echo "BRIDGE-MOUNT $TYPE $part $name OK"; } \
                 || echo "BRIDGE-MOUNT $TYPE $part $name FAIL"
             ;;

@@ -7,12 +7,16 @@
 #       会命中宿主缓冲区里的旧图案 → 假阴性 (2026-11-10 实测踩坑)
 # 流程: ① SMB 埋 32MB 图案 ② 宿主定位偏移 ③ guest sync 后宿主预校验图案在介质上
 #       ④ guest 删除+fstrim ⑤ 宿主 F_NOCACHE 读回判决: 全零=EXECUTED 图案在=SWALLOWED
-# 用法: sudo ./guest-deep-trim.sh <分区> <共享名>   例: sudo ./guest-deep-trim.sh disk7s2 KIOXIA
+# 用法: sudo ./guest-deep-trim.sh <分区> <共享名> [--fast]
+#   --fast: 只删不全量 fstrim — 依赖挂载的 -o discard (删除即发小量 UNMAP,
+#           秒级归零, 适合快速物理验证); 默认 full 为全量 fstrim (真实养护负载)
 # 前提: anyFS 已接管该分区, App 侧 SMB 卷已挂载; Terminal.app (FDA) 里跑
 set -e
 cd "$(dirname "$0")"
-PART="${1:?用法: sudo $0 <分区如disk7s2> <共享名>}"
+PART="${1:?用法: sudo $0 <分区如disk7s2> <共享名> [--fast]}"
 SHARE="${2:?缺少共享名}"
+FAST=0
+[ "${3:-}" = "--fast" ] && FAST=1
 VOL="/Volumes/$SHARE"
 [ -d "$VOL" ] || { echo "FAIL: $VOL 不存在 (App 侧 SMB 挂载了吗?)"; exit 1; }
 PIPE=/tmp/anyfsd-serial
@@ -64,12 +68,18 @@ PAT=$(echo "$PRE" | sed -n 's/.*pattern=\([0-9]*\).*/\1/p')
 [ "${PAT:-0}" -gt 1038090 ] || { echo "FAIL: 预校验非全图案 (介质上没有?), 中止"; exit 1; }
 echo "预校验通过: 图案物理在盘 ($((SECONDS - T0))s)"
 
-echo "== 4/5 guest 删除 + fstrim =="
+if [ "$FAST" = 1 ]; then
+    echo "== 4/5 guest 删除 (在线 discard, 不全量 fstrim) =="
+    TRIMCMD=": # fast 模式: 靠挂载的 -o discard 在线修剪"
+else
+    echo "== 4/5 guest 删除 + fstrim =="
+    TRIMCMD="fstrim -v \$M >> \$M/$RESULT 2>&1"
+fi
 cat > "$VOL/$SCRIPT" <<GUESTEOF
 M=/mnt/$SHARE
 rm -f \$M/.deep-trim-pattern
 sync
-fstrim -v \$M >> \$M/$RESULT 2>&1
+$TRIMCMD
 echo "DEEP:FSTRIM-DONE rc=\$?" >> \$M/$RESULT
 rm -f \$M/$SCRIPT
 GUESTEOF
@@ -80,14 +90,16 @@ wait_marker "DEEP:FSTRIM-DONE" 600
 echo "fstrim 完成 (耗时 $((SECONDS - T1))s):"
 grep -v "DEEP:" "$VOL/$RESULT" | sed 's/^/  /'
 
-echo "== 5/5 宿主 F_NOCACHE 读回 (每 10s 轮询, 测归零时延曲线) =="
-for i in $(seq 0 60); do
-    [ "$i" -gt 0 ] && sleep 10
+echo "== 5/5 宿主 F_NOCACHE 读回判决 =="
+# fast 模式预期秒级归零, 加密轮询 (2s); full 模式按异步销账量级 (10s)
+if [ "$FAST" = 1 ]; then STEP=2; N=90; else STEP=10; N=60; fi
+for i in $(seq 0 $N); do
+    [ "$i" -gt 0 ] && sleep $STEP
     OUT=$(./unmap-live "/dev/r$PART" --verify "$OFF")
     Z=$(echo "$OUT" | sed -n 's/.*zero=\([0-9]*\).*/\1/p')
-    echo "T+$((i * 10))s: zero=$Z/1048576"
-    [ "$Z" = "1048576" ] && { echo "VERDICT: TRIM-EXECUTED (归零时延 $((i * 10))s)"; break; }
-    [ "$i" = 60 ] && echo "VERDICT: TRIM-SWALLOWED? (600s 仍未归零)"
+    echo "T+$((i * STEP))s: zero=$Z/1048576"
+    [ "$Z" = "1048576" ] && { echo "VERDICT: TRIM-EXECUTED (归零时延 $((i * STEP))s)"; break; }
+    [ "$i" = "$N" ] && echo "VERDICT: TRIM-SWALLOWED? ($((N * STEP))s 仍未归零)"
 done
 echo "---- 总耗时 $((SECONDS - T0))s ----"
 
