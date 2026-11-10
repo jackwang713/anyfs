@@ -26,12 +26,9 @@ struct PartInfo: Identifiable, Equatable {
     let active: Bool      // anyFS 接管中
     let disk: String      // 父盘, 如 disk3
     let model: String     // 盘型号, 如 RTL9210B-CG
-    // 共享名规则 (与 daemon 注入/init.sh 一致): 纯 ASCII 用卷标, 否则回退 bsd;
-    // mount_smbfs URL 解析器不接受非 ASCII, 共享名只能出 ASCII
-    var shareName: String {
-        let base = (!label.isEmpty && label.allSatisfy(\.isASCII)) ? label : id
-        return base.replacingOccurrences(of: " ", with: "_")
-    }
+    // guest SMB 共享名 (daemon 下发, 与 guest 挂载点/smb.conf 一致);
+    // 非 ASCII 卷标回退为 bsd — mount_smbfs URL 解析器不接受非 ASCII
+    let shareName: String
     // 三态文案: 回答"我现在能不能往里拷东西"
     // 注意: macOS 原生挂载的读写性因文件系统而异 — NTFS 只读, FAT32/exFAT 原生可读写
     var stateText: String {
@@ -94,14 +91,20 @@ final class DaemonClient: ObservableObject {
                 self?.parts = arr.compactMap { item -> PartInfo? in
                     guard let d = item as? [String: Any],
                           let bsd = d["bsd"] as? String else { return nil }
+                    let label = d["label"] as? String ?? bsd
+                    // 老版本 daemon 无 "share" 字段时按旧规则本地推导
+                    let share = (d["share"] as? String)
+                        ?? ((!label.isEmpty && label.allSatisfy(\.isASCII))
+                            ? label.replacingOccurrences(of: " ", with: "_") : bsd)
                     return PartInfo(id: bsd,
-                                    label: d["label"] as? String ?? bsd,
+                                    label: label,
                                     fs: d["fs"] as? String ?? "",
                                     sizeGB: d["sizeGB"] as? String ?? "?",
                                     mounted: d["mounted"] as? Bool ?? false,
                                     active: d["active"] as? Bool ?? false,
                                     disk: d["disk"] as? String ?? bsd,
-                                    model: d["model"] as? String ?? (d["disk"] as? String ?? ""))
+                                    model: d["model"] as? String ?? (d["disk"] as? String ?? ""),
+                                    shareName: share)
                 }
             }
         }

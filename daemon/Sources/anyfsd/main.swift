@@ -195,11 +195,11 @@ final class QEMUManager {
 
     init(partitions: [String]) { self.partitions = partitions }
 
-    // 只卸选中的分区 (不可用 unmountDisk 整盘 — 会波及留给 macOS 的 APFS 等分区)
+    // 只卸选中的目标 (不可用 unmountDisk 整盘 — 会波及留给 macOS 的 APFS 等分区);
+    // 整盘 (superfloppy) 同样要卸: NTFS/exFAT 整盘会被 macOS fskit 只读自动挂载,
+    // 不压掉就是 guest/macOS 双持; ext4 整盘 macOS 挂不上, unmount 报错无害
     private func unmountTargetsSync() {
         for part in partitions {
-            // 整盘 (superfloppy) macOS 本就挂载不了, 无需压制
-            guard part.range(of: #"s\d+$"#, options: .regularExpression) != nil else { continue }
             let t = Process()
             t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
             t.arguments = ["unmount", "force", "/dev/\(part)"]
@@ -593,6 +593,17 @@ final class DiskManager {
         infoOf(bsd)["VolumeName"] as? String ?? ""
     }
 
+    // guest SMB 共享名的唯一来源 (App 显示/daemon 注入/guest 挂载点三方必须一致):
+    // ASCII 卷标用卷标 (空格转下划线, 与 guest init.sh 的 tr 一致),
+    // 非 ASCII 或空卷标回退 bsd — mount_smbfs 的 URL 解析器不接受非 ASCII
+    private func shareNameOf(_ part: String) -> String {
+        let diskutilLabel = volumeNameOf(part)
+        lock.lock(); let probed = wholeDiskLabels[part] ?? ""; lock.unlock()
+        let label = diskutilLabel.isEmpty ? probed : diskutilLabel
+        guard !label.isEmpty, label.allSatisfy(\.isASCII) else { return part }
+        return label.replacingOccurrences(of: " ", with: "_")
+    }
+
     // 枚举外接盘上的可接管分区 (NTFS/exFAT/ext* 等)
     func listAvailable() -> [[String: Any]] {
         var out: [[String: Any]] = []
@@ -621,14 +632,20 @@ final class DiskManager {
                 lock.lock()
                 if !probe.label.isEmpty { wholeDiskLabels[bsd] = probe.label }
                 lock.unlock()
+                // 卷标: macOS 认识的整盘 (NTFS/exFAT 会被 fskit 只读自动挂载) 用 diskutil 卷名,
+                // 不认识的 (ext4) 用魔数探测出的卷标, 都没有则显示"型号 整盘"
+                let volLabel = volumeNameOf(bsd)
+                let displayLabel = !volLabel.isEmpty ? volLabel
+                    : (!probe.label.isEmpty ? probe.label : "\(modelOf(bsd)) 整盘")
                 out.append([
                     "bsd": bsd,
-                    "label": probe.label.isEmpty ? "\(modelOf(bsd)) 整盘" : probe.label,
+                    "label": displayLabel,
+                    "share": shareNameOf(bsd),
                     "fs": probe.fs,
                     "disk": bsd,
                     "model": modelOf(bsd),
                     "sizeGB": String(format: "%.1f", Double(size) / 1e9),
-                    "mounted": false,
+                    "mounted": !((infoOf(bsd)["MountPoint"] as? String) ?? "").isEmpty,
                     "active": active.contains(bsd),
                 ])
                 continue
@@ -651,6 +668,7 @@ final class DiskManager {
                 out.append([
                     "bsd": bsd,
                     "label": volName ?? (p["FilesystemName"] as? String) ?? bsd,
+                    "share": shareNameOf(bsd),
                     "fs": !infoFS.isEmpty ? infoFS : (fs.isEmpty ? content : fs),
                     "disk": parent,
                     "model": modelOf(parent),
@@ -690,14 +708,8 @@ final class DiskManager {
             FileManager.default.createFile(atPath: Config.statePath, contents: "taking-over \(parts.joined(separator: ","))\n".data(using: .utf8))
 
             let q = QEMUManager(partitions: parts)
-            // 共享名只出 ASCII: mount_smbfs 的 URL 解析器不接受非 ASCII, smbutil 枚举也会崩;
-            // 非 ASCII 卷标回退用 bsd 设备名 (UI 仍显示真卷标, 共享名是内部细节)
-            q.partLabels = Dictionary(uniqueKeysWithValues: parts.map { part in
-                let diskutilLabel = self.volumeNameOf(part)
-                let label = diskutilLabel.isEmpty ? (self.wholeDiskLabels[part] ?? "") : diskutilLabel
-                let asciiOK = !label.isEmpty && label.allSatisfy { $0.isASCII }
-                return (part, asciiOK ? label : part)
-            })
+            // 共享名规则集中在 shareNameOf (与 listAvailable 下发的 "share" 同一来源)
+            q.partLabels = Dictionary(uniqueKeysWithValues: parts.map { ($0, self.shareNameOf($0)) })
             self.qemu = q
             do {
                 try q.start()
@@ -728,8 +740,8 @@ final class DiskManager {
 
     private func remountToMacOS(_ parts: [String]) {
         for part in parts {
-            // 整盘 (superfloppy) macOS 挂不了, 无需挂回
-            guard part.range(of: #"s\d+$"#, options: .regularExpression) != nil else { continue }
+            // 整盘 (superfloppy) 同样尝试挂回: NTFS/exFAT 整盘 macOS 可只读挂载,
+            // ext4 等 macOS 不认识的类型 mount 报错无害
             log("交还 macOS: diskutil mount /dev/\(part)")
             let t = Process()
             t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
