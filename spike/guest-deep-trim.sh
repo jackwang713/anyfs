@@ -34,9 +34,11 @@ sync
 
 echo "== 2/5 guest 内 filefrag 定位 (FIEMAP, 文件系统无关, 免扫描) =="
 # filefrag 的 physical offset 相对被挂载设备 (= 直通分区) — 与宿主 /dev/r分区 寻址直接通用
-# 需要 bundle 里有 e2fsprogs (filefrag); 结果经卷内结果文件回传 (串口 fifo 宿主不可读)
+# 需要 bundle 里有 filefrag (Alpine 在 e2fsprogs-extra 包, 装到 /opt/usr/sbin/);
+# bundle 二进制不在 guest PATH 里, 必须用绝对路径 (init.sh 起 smbd 同理);
+# 结果经卷内结果文件回传 (串口 fifo 宿主不可读)
 rm -f "$VOL/$RESULT"
-printf 'sync; filefrag -v /mnt/%s/.deep-trim-pattern > /mnt/%s/%s 2>&1; echo DEEP:LOCATED >> /mnt/%s/%s; sync\n' \
+printf 'sync; /opt/usr/sbin/filefrag -v /mnt/%s/.deep-trim-pattern > /mnt/%s/%s 2>&1; echo DEEP:LOCATED >> /mnt/%s/%s; sync\n' \
     "$SHARE" "$SHARE" "$RESULT" "$SHARE" "$RESULT" > "$PIPE.in"
 wait_marker "DEEP:LOCATED" 30
 BS=$(sed -n 's/.*blocks of \([0-9]*\) bytes.*/\1/p' "$VOL/$RESULT" | head -1)
@@ -47,7 +49,7 @@ if [ -n "$BS" ] && [ -n "$PHYS" ] && [ -n "$LEN" ] && [ "$((LEN * BS))" -ge 1048
     OFF=$((PHYS * BS))
     echo "FIEMAP 定位: 物理块 $PHYS × ${BS}B = 分区偏移 $OFF (extent 连续 $((LEN * BS / 1048576))MB)"
 else
-    echo "FAIL: filefrag 解析失败 (bundle 太旧缺 e2fsprogs? 重烧 bundle):"; cat "$VOL/$RESULT"
+    echo "FAIL: filefrag 解析失败 (bundle 缺 e2fsprogs-extra? 重烧 bundle):"; cat "$VOL/$RESULT"
     rm -f "$VOL/.deep-trim-pattern" "$VOL/$RESULT"; exit 1
 fi
 rm -f "$VOL/$RESULT"

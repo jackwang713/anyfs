@@ -5,7 +5,7 @@ set -e
 apk add --root /mnt/b --initdb \
     --repository https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.21/main \
     --keys-dir /etc/apk/keys \
-    samba ntfs-3g-progs avahi dbus e2fsprogs
+    samba ntfs-3g-progs avahi dbus e2fsprogs-extra
 echo G-ROOTFS-RC=$?
 # 删 bundle 内 musl (用 live 系统自带, 避免双 musl 冲突; 架构名用通配)
 rm -f /mnt/b/lib/ld-musl-*.so.1 /mnt/b/usr/lib/libc.musl-*.so.1
