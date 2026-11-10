@@ -866,6 +866,165 @@ final class DiskManager {
         }
         return "fstrim 超时"
     }
+    // MARK: - exFAT 原生养护 (不接管, 直发 DKIOCUNMAP)
+    // 设计: exFAT macOS 原生可读写, 接管零收益; 养护 = 卸载 → 解析 allocation bitmap
+    //       找空闲簇 → 逐段 DKIOCUNMAP → 挂回, 全程不经 VM
+    // DKIOCUNMAP 的 Swift shim: 宏因 dk_unmap_t 含指针不被 Clang importer 导入,
+    // 按内核稳定 ABI 手工展开 (C 侧打印核对 = 0x8010641F, 两个结构体均 16 字节)
+    private struct DKExtent { var offset: UInt64; var length: UInt64 }
+    private struct DKUnmap { var extents: UnsafeRawPointer?; var extentsCount: UInt32; var flags: UInt32 }
+    private let DKIOCUNMAP_CMD: UInt = 0x80000000 | UInt(16 << 16) | UInt(0x64 << 8) | UInt(31)
+
+    // 裸盘字符设备 pread 要求偏移/长度 512 对齐 (踩过: 不对齐直接 EINVAL)
+    private func rawRead(_ fd: Int32, _ off: UInt64, _ len: Int) -> [UInt8]? {
+        let sector = UInt64(512)
+        let start = off / sector * sector
+        let total = Int((off + UInt64(len) + sector - 1) / sector * sector - start)
+        var buf = [UInt8](repeating: 0, count: total)
+        guard pread(fd, &buf, total, off_t(start)) == total else { return nil }
+        let s = Int(off - start)
+        return Array(buf[s..<(s + len)])
+    }
+
+    private func le32(_ b: [UInt8], _ o: Int) -> UInt32 {
+        UInt32(b[o]) | UInt32(b[o+1]) << 8 | UInt32(b[o+2]) << 16 | UInt32(b[o+3]) << 24
+    }
+    private func le64(_ b: [UInt8], _ o: Int) -> UInt64 { UInt64(le32(b, o)) | UInt64(le32(b, o+4)) << 32 }
+
+    // 解析 exFAT allocation bitmap → 空闲簇的字节区间段 (分区相对偏移, 512 对齐天然满足)
+    private func exfatFreeRuns(_ fd: Int32) -> [(UInt64, UInt64)]? {
+        guard let vbr = rawRead(fd, 0, 512),
+              String(decoding: vbr[3...10], as: UTF8.self) == "EXFAT   " else { return nil }
+        let sectSize = UInt64(1) << vbr[108]
+        let clustSize = sectSize << vbr[109]
+        guard sectSize >= 512, sectSize <= 4096, clustSize >= sectSize, clustSize <= 32 << 20 else { return nil }
+        let fatOff = UInt64(le32(vbr, 80)) * sectSize
+        let fatLen = UInt64(le32(vbr, 84)) * sectSize
+        let heapOff = UInt64(le32(vbr, 88)) * sectSize
+        let clustCount = le32(vbr, 92)
+        let rootClust = le32(vbr, 96)
+        guard fatLen > 0, fatLen < 1 << 30, clustCount > 0, rootClust >= 2 else { return nil }
+        guard let fat = rawRead(fd, fatOff, Int(fatLen)) else { return nil }
+        // FAT 链跟踪 (EOC ≥ 0xFFFFFFF8; 0 = 未标记, 按连续分配兜底)
+        func fatChain(_ start: UInt32, contiguousLen: UInt64?) -> [UInt32] {
+            var out: [UInt32] = []
+            var c = start
+            while c >= 2 && c < 0xFFFFFFF8 {
+                out.append(c)
+                let n = le32(fat, Int(c) * 4)
+                if n >= 2 && n < 0xFFFFFFF8 { c = n; continue }
+                // FAT 未维护此链 (NoFatChain) → 按连续分配补齐到声明长度
+                if let need = contiguousLen {
+                    let total = Int((need + clustSize - 1) / clustSize)
+                    while out.count < total { out.append(out.last! + 1) }
+                }
+                break
+            }
+            return out
+        }
+        func readClusters(_ start: UInt32, _ len: UInt64) -> [UInt8]? {
+            var data = [UInt8]()
+            for c in fatChain(start, contiguousLen: len) {
+                guard let chunk = rawRead(fd, heapOff + UInt64(c - 2) * clustSize, Int(clustSize)) else { return nil }
+                data += chunk
+            }
+            return data
+        }
+        // 根目录找 allocation bitmap 目录项 (类型 0x81)
+        guard let rootDir = readClusters(rootClust, 0) else { return nil }
+        var bmpCluster: UInt32 = 0, bmpLen: UInt64 = 0
+        var off = 0
+        while off + 32 <= rootDir.count {
+            let t = rootDir[off]
+            if t == 0 { break }
+            if t == 0x81 {
+                bmpCluster = le32(rootDir, off + 20)
+                bmpLen = le64(rootDir, off + 24)
+                break
+            }
+            off += 32
+        }
+        guard bmpCluster >= 2, bmpLen > 0, bmpLen < 1 << 28 else { return nil }
+        guard let bitmap = readClusters(bmpCluster, bmpLen) else { return nil }
+        // 位图: bit i (字节内 LSB 优先) 对应簇 i+2, 0=空闲
+        var runs: [(UInt64, UInt64)] = []
+        var runStart: UInt64? = nil
+        for i in 0..<Int(clustCount) {
+            let free = bitmap[i / 8] & (1 << (i % 8)) == 0
+            if free && runStart == nil { runStart = UInt64(i) }
+            if !free, let s = runStart {
+                runs.append((heapOff + s * clustSize, (UInt64(i) - s) * clustSize))
+                runStart = nil
+            }
+        }
+        if let s = runStart {
+            runs.append((heapOff + s * clustSize, (UInt64(clustCount) - s) * clustSize))
+        }
+        return runs
+    }
+
+    // exFAT 原生养护入口 (XPC): 卸载 → UNMAP 全部空闲段 → 挂回
+    func trimNative(_ bsd: String, reply: @escaping (String) -> Void) {
+        DispatchQueue(label: "trim-native").async {
+            self.lock.lock()
+            let busy = self.busy, active = self.activeParts.contains(bsd)
+            self.lock.unlock()
+            guard !busy else { reply("failed: 忙 (上一次操作进行中)"); return }
+            guard !active else { reply("failed: \(bsd) 已由 anyFS 接管, 用 guest 内养护"); return }
+            guard bsd.range(of: #"^disk\d+s\d+$"#, options: .regularExpression) != nil else {
+                reply("failed: 分区名不合法"); return
+            }
+            self.busy = true
+            defer { self.busy = false }
+
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+            t.arguments = ["unmount", "force", "/dev/\(bsd)"]
+            t.standardOutput = FileHandle.nullDevice; t.standardError = FileHandle.nullDevice
+            try? t.run(); t.waitUntilExit()
+            // 结束或失败路径都挂回 macOS (defer 保证)
+            defer {
+                let m = Process()
+                m.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+                m.arguments = ["mount", "/dev/\(bsd)"]
+                m.standardOutput = FileHandle.nullDevice; m.standardError = FileHandle.nullDevice
+                try? m.run(); m.waitUntilExit()
+            }
+
+            let fd = open("/dev/r\(bsd)", O_RDWR)
+            guard fd >= 0 else { reply("failed: 打开裸设备失败 (errno=\(errno))"); return }
+            defer { close(fd) }
+            guard let runs = self.exfatFreeRuns(fd) else {
+                reply("failed: 不是可识别的 exFAT 分区或元数据损坏"); return
+            }
+            guard !runs.isEmpty else { reply("无空闲空间可养护"); return }
+            var done: UInt64 = 0, failedSegs = 0
+            var i = 0
+            while i < runs.count {
+                let batch = Array(runs[i..<min(i + 256, runs.count)])
+                var exts = batch.map { DKExtent(offset: $0.0, length: $0.1) }
+                let rc = exts.withUnsafeMutableBufferPointer { bp -> Int32 in
+                    var um = DKUnmap(extents: UnsafeRawPointer(bp.baseAddress),
+                                     extentsCount: UInt32(batch.count), flags: 0)
+                    return ioctl(fd, self.DKIOCUNMAP_CMD, &um)
+                }
+                if rc != 0 {
+                    failedSegs += batch.count
+                    if i == 0 {
+                        reply("failed: DKIOCUNMAP 被内核/桥拒绝 (errno=\(errno)) — 该桥可能不支持 UNMAP")
+                        return
+                    }
+                } else {
+                    done += batch.reduce(UInt64(0)) { $0 + $1.1 }
+                }
+                i += 256
+            }
+            log("exFAT 原生养护 \(bsd): \(done / 1_000_000)MB, \(runs.count) 段, 失败 \(failedSegs)")
+            reply(failedSegs == 0
+                  ? "已养护 \(String(format: "%.1f", Double(done) / 1e9))GB (\(runs.count) 段空闲区)"
+                  : "部分失败: \(failedSegs)/\(runs.count) 段被拒")
+        }
+    }
 }
 
 // MARK: - XPC 服务
@@ -878,6 +1037,7 @@ final class DiskManager {
     func releaseAll(withReply reply: @escaping (NSNumber) -> Void)
     func trimNow(withReply reply: @escaping (NSString) -> Void)
     func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
+    func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -925,6 +1085,10 @@ final class XPCService: NSObject, AnyFSDaemonProtocol, NSXPCListenerDelegate {
         DispatchQueue(label: "xpc-trim-part").async {
             reply(DiskManager.shared.trimPartition(label as String) as NSString)
         }
+    }
+    // exFAT 原生养护 (卸载→DKIOCUNMAP→挂回, 不经 VM)
+    func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
+        DiskManager.shared.trimNative(bsd as String) { s in reply(s as NSString) }
     }
     // App 退出联动: 干净收尸完成后才回话 (App 端显示"正在关闭…"等待), 然后 daemon 自毁
     func appQuit(withReply reply: @escaping (NSNumber) -> Void) {

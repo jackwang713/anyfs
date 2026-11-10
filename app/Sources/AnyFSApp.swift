@@ -14,6 +14,7 @@ import AppKit
     func releaseAll(withReply reply: @escaping (NSNumber) -> Void)
     func trimNow(withReply reply: @escaping (NSString) -> Void)
     func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
+    func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -42,6 +43,8 @@ struct PartInfo: Identifiable, Equatable {
         let f = fs.lowercased()
         return f.contains("exfat") || f.contains("ext") || f.contains("fat") || f.contains("msdos")
     }
+    // exFAT: macOS 原生可读写, 接管零收益 — 不给接管开关, 养护走 daemon 原生 DKIOCUNMAP
+    var isExFAT: Bool { fs.lowercased().contains("exfat") }
 }
 
 struct DiskGroup: Identifiable {
@@ -57,6 +60,7 @@ final class DaemonClient: ObservableObject {
     @Published var trimming: Set<String> = []      // 养护在途的分区
     @Published var quitting = false                // 退出流程在途 (等 VM 关闭)
     @Published var lastError = ""
+    @Published var notice = ""                     // 中性提示 (养护结果等)
 
     var busy: Bool { !pending.isEmpty || !trimming.isEmpty || quitting }
     var anyActive: Bool { parts.contains(where: \.active) }
@@ -155,6 +159,20 @@ final class DaemonClient: ObservableObject {
         }
     }
 
+    // exFAT 原生养护 (不接管; daemon 卸载→DKIOCUNMAP→挂回, 不经 VM)
+    func trimNative(_ p: PartInfo) {
+        guard !busy else { return }
+        trimming.insert(p.id)
+        proxy?.trimNative(p.id as NSString) { [weak self] s in
+            Task { @MainActor in
+                self?.trimming.remove(p.id)
+                let r = s as String
+                if r.hasPrefix("failed") { self?.lastError = r } else { self?.notice = r }
+                self?.refresh()
+            }
+        }
+    }
+
     // 挂载 SMB 共享 (open=true 时在 Finder 打开)
     // 挂载点由 daemon (root) 预建并 chown 给当前用户 — /Volumes 普通用户不可建目录
     func mountShare(_ p: PartInfo, open: Bool) {
@@ -248,6 +266,12 @@ struct MenuPanel: View {
                     .foregroundStyle(.red)
                     .lineLimit(2)
             }
+            if !client.notice.isEmpty {
+                Text(client.notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
             Divider()
             footer
         }
@@ -307,31 +331,44 @@ struct MenuPanel: View {
         }
     }
 
+    // 分区标签 (卷标 + 状态行), Toggle 和裸行两种形态共用
+    private func partLabel(_ p: PartInfo) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(p.label).font(.body)
+            HStack(spacing: 4) {
+                Text("\(p.fs) · \(p.sizeGB)GB")
+                Text("·")
+                Text(p.stateText).foregroundStyle(p.stateColor)
+                if p.active && !p.needsManualTrim {
+                    Text("· 在线养护").foregroundStyle(.secondary)
+                }
+                if p.isExFAT && !p.active {
+                    Text("· 原生养护").foregroundStyle(.secondary)
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .animation(.easeInOut(duration: 0.3), value: p.stateText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func partRow(_ p: PartInfo) -> some View {
         HStack(alignment: .center, spacing: 8) {
-            Toggle(isOn: Binding(
-                get: { p.active },
-                set: { client.setPartition(p, on: $0) }
-            )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(p.label).font(.body)
-                    HStack(spacing: 4) {
-                        Text("\(p.fs) · \(p.sizeGB)GB")
-                        Text("·")
-                        Text(p.stateText).foregroundStyle(p.stateColor)
-                        if p.active && !p.needsManualTrim {
-                            Text("· 在线养护").foregroundStyle(.secondary)
-                        }
-                    }
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .animation(.easeInOut(duration: 0.3), value: p.stateText)
+            if p.isExFAT && !p.active {
+                // exFAT: macOS 原生可读写, 接管零收益 — 无开关, 只给养护按钮
+                partLabel(p)
+            } else {
+                Toggle(isOn: Binding(
+                    get: { p.active },
+                    set: { client.setPartition(p, on: $0) }
+                )) {
+                    partLabel(p)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(client.busy)
             }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .disabled(client.busy)
             if client.pending.contains(p.id) {
                 ArcSpinner(size: 14)
             } else if client.trimming.contains(p.id) {
@@ -353,6 +390,15 @@ struct MenuPanel: View {
                     .buttonStyle(.borderless)
                     .help("挂载并在 Finder 打开")
                 }
+            } else if p.isExFAT {
+                // 原生养护: daemon 卸载 → DKIOCUNMAP → 挂回, 不经 VM
+                Button { client.trimNative(p) } label: {
+                    Image(systemName: "leaf")
+                        .font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .disabled(client.busy)
+                .help("立即养护 (原生 TRIM, 期间卷会短暂卸载)")
             }
         }
         .padding(.leading, 4)
