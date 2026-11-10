@@ -5,6 +5,7 @@
 //       单 VM 挂多个分区设备; 同盘未选中的分区 (如 APFS) 留给 macOS 原生使用
 import Foundation
 import DiskArbitration
+import IOKit
 import SystemConfiguration   // SCDynamicStoreCopyConsoleUser: 取当前登录用户 uid
 
 // MARK: - 配置 (打包形态: /usr/local/etc/anyfsd.conf 覆盖 dev 默认路径)
@@ -523,7 +524,7 @@ final class DiskManager {
     }
 
     private func invalidateInfoCache(_ reason: String) {
-        lock.lock(); infoCache.removeAll(); wholeDiskLabels.removeAll(); wholeDiskProbe.removeAll(); lock.unlock()
+        lock.lock(); infoCache.removeAll(); wholeDiskLabels.removeAll(); wholeDiskProbe.removeAll(); usbNameCache.removeAll(); lock.unlock()
         log("枚举缓存已清空 (\(reason))")
     }
 
@@ -590,10 +591,51 @@ final class DiskManager {
         return (obj["FilesystemName"] as? String) ?? (obj["FilesystemType"] as? String) ?? ""
     }
 
-    // 整盘型号 (UI 分组标题): MediaName, 如 "RTL9210B-CG"
+    // 整盘型号 (UI 分组标题): MediaName, 如 "RTL9210B-CG";
+    // 廉价盒子会上报垃圾 MediaName (JMS583 盒实测上报 "3.2"), 字母数 <2 判为垃圾,
+    // 回退 IOKit 的 USB Product Name (该盒实际是 "NVME USB3.2")
+    private var usbNameCache: [String: String] = [:]
     private func modelOf(_ wholeBsd: String) -> String {
         let obj = infoOf(wholeBsd)
-        return (obj["MediaName"] as? String) ?? wholeBsd
+        let media = (obj["MediaName"] as? String) ?? ""
+        if media.filter(\.isLetter).count >= 2 { return media }
+        lock.lock(); let cached = usbNameCache[wholeBsd]; lock.unlock()
+        if let cached { return cached }
+        let resolved = usbProductName(for: wholeBsd) ?? (media.isEmpty ? wholeBsd : media)
+        lock.lock(); usbNameCache[wholeBsd] = resolved; lock.unlock()
+        return resolved
+    }
+
+    // 沿 IOService 树从 IOMedia (BSD Name 匹配) 向上找带 USB Product Name 的父节点
+    private func usbProductName(for wholeBsd: String) -> String? {
+        var it: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOMedia"), &it) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(it) }
+        while case let obj = IOIteratorNext(it), obj != 0 {
+            let name = IORegistryEntryCreateCFProperty(obj, "BSD Name" as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? String
+            if name == wholeBsd {
+                var cur = obj
+                var result: String? = nil
+                while true {
+                    if let pn = IORegistryEntryCreateCFProperty(cur, "USB Product Name" as CFString, kCFAllocatorDefault, 0)?
+                        .takeRetainedValue() as? String {
+                        result = pn
+                        if cur != obj { IOObjectRelease(cur) }
+                        break
+                    }
+                    var parent: io_registry_entry_t = 0
+                    let kr = IORegistryEntryGetParentEntry(cur, kIOServicePlane, &parent)
+                    if cur != obj { IOObjectRelease(cur) }
+                    guard kr == KERN_SUCCESS, parent != 0 else { break }
+                    cur = parent
+                }
+                IOObjectRelease(obj)
+                return result
+            }
+            IOObjectRelease(obj)
+        }
+        return nil
     }
 
     // 真实卷标 (注入 guest 用; diskutil 读非 ASCII 卷标无乱码问题)
@@ -966,13 +1008,15 @@ final class DiskManager {
     // exFAT 原生养护入口 (XPC): 卸载 → UNMAP 全部空闲段 → 挂回
     func trimNative(_ bsd: String, reply: @escaping (String) -> Void) {
         DispatchQueue(label: "trim-native").async {
+            // 失败也要留痕 (教训: 只回传 UI 不写日志 → 事后无法排查)
+            func fail(_ s: String) { log("exFAT 原生养护 \(bsd) 失败: \(s)"); reply("failed: \(s)") }
             self.lock.lock()
             let busy = self.busy, active = self.activeParts.contains(bsd)
             self.lock.unlock()
             guard !busy else { reply("failed: 忙 (上一次操作进行中)"); return }
-            guard !active else { reply("failed: \(bsd) 已由 anyFS 接管, 用 guest 内养护"); return }
+            guard !active else { fail("已由 anyFS 接管, 用 guest 内养护"); return }
             guard bsd.range(of: #"^disk\d+s\d+$"#, options: .regularExpression) != nil else {
-                reply("failed: 分区名不合法"); return
+                fail("分区名不合法"); return
             }
             self.busy = true
             defer { self.busy = false }
@@ -992,10 +1036,10 @@ final class DiskManager {
             }
 
             let fd = open("/dev/r\(bsd)", O_RDWR)
-            guard fd >= 0 else { reply("failed: 打开裸设备失败 (errno=\(errno))"); return }
+            guard fd >= 0 else { fail("打开裸设备失败 (errno=\(errno))"); return }
             defer { close(fd) }
             guard let runs = self.exfatFreeRuns(fd) else {
-                reply("failed: 不是可识别的 exFAT 分区或元数据损坏"); return
+                fail("不是可识别的 exFAT 分区或元数据损坏"); return
             }
             guard !runs.isEmpty else { reply("无空闲空间可养护"); return }
             var done: UInt64 = 0, failedSegs = 0
@@ -1011,7 +1055,7 @@ final class DiskManager {
                 if rc != 0 {
                     failedSegs += batch.count
                     if i == 0 {
-                        reply("failed: DKIOCUNMAP 被内核/桥拒绝 (errno=\(errno)) — 该桥可能不支持 UNMAP")
+                        fail("DKIOCUNMAP 被内核/桥拒绝 (errno=\(errno) \(String(cString: strerror(errno)))) — 该桥可能不支持 UNMAP")
                         return
                     }
                 } else {
