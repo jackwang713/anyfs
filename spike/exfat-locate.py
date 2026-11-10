@@ -24,22 +24,24 @@ def main():
     dev, target = sys.argv[1], sys.argv[2]
     fd = os.open(dev, os.O_RDONLY)
 
-    # --- GPT: 找最大的 Microsoft Basic Data 分区 ---
+    # --- 定位 exFAT 分区起点: 整盘走 GPT 找最大 MS Basic Data;
+    #     设备本身就是分区 (anyFS 分区直通场景, 无 GPT) 则起点即 0 ---
     hdr = os.pread(fd, 512, 512)
-    if hdr[:8] != b"EFI PART":
-        die("非 GPT 盘")
-    entry_lba, num_entries, entry_size = struct.unpack_from("<QII", hdr, 72)
-    table = os.pread(fd, num_entries * entry_size, entry_lba * 512)
-    part_lba, part_size = 0, 0
-    for i in range(num_entries):
-        ent = table[i * entry_size:(i + 1) * entry_size]
-        if ent[:16] == MS_BASIC_DATA:
-            first, last = struct.unpack_from("<QQ", ent, 32)
-            if last - first > part_size:
-                part_lba, part_size = first, last - first
-    if not part_lba:
-        die("未找到 Microsoft Basic Data 分区")
-    part_base = part_lba * 512
+    if hdr[:8] == b"EFI PART":
+        entry_lba, num_entries, entry_size = struct.unpack_from("<QII", hdr, 72)
+        table = os.pread(fd, num_entries * entry_size, entry_lba * 512)
+        part_lba, part_size = 0, 0
+        for i in range(num_entries):
+            ent = table[i * entry_size:(i + 1) * entry_size]
+            if ent[:16] == MS_BASIC_DATA:
+                first, last = struct.unpack_from("<QQ", ent, 32)
+                if last - first > part_size:
+                    part_lba, part_size = first, last - first
+        if not part_lba:
+            die("未找到 Microsoft Basic Data 分区")
+        part_base = part_lba * 512
+    else:
+        part_base = 0  # 直通分区设备: exFAT 从 0 开始
 
     # --- exFAT 启动扇区 ---
     boot = os.pread(fd, 512, part_base)
@@ -95,17 +97,35 @@ def main():
                     i += 32
                     continue
                 if name == target:
-                    clus_list = [first_clus] if contiguous else chain(first_clus)
-                    need = (min(data_len, 1024 * 1024) + clus_bytes - 1) // clus_bytes
-                    clus_list = clus_list[:need]
-                    if any(clus_list[k + 1] - clus_list[k] != 1 for k in range(len(clus_list) - 1)):
-                        die(f"文件 {target} 物理不连续, 回退扫描模式")
-                    off = part_base + clus_off(first_clus)
-                    # 自检: 读 1MB 统计 0x5A 占比 (顺便验证 macOS 缓存已落盘)
+                    # 空闲区碎片化的盘上文件可能分多段, 但检测只需一段连续 >=1MB:
+                    # 走完整 FAT 链拼出全部连续段, 挑最长段
+                    if contiguous:
+                        total = (data_len + clus_bytes - 1) // clus_bytes
+                        runs = [(first_clus, first_clus + total - 1)]
+                    else:
+                        clus_list = chain(first_clus)
+                        runs, start = [], clus_list[0]
+                        for a, b in zip(clus_list, clus_list[1:]):
+                            if b != a + 1:
+                                runs.append((start, a))
+                                start = b
+                        runs.append((start, clus_list[-1]))
+                    need = 1024 * 1024 // clus_bytes + 1
+                    best = max(runs, key=lambda r: r[1] - r[0])
+                    span = best[1] - best[0] + 1
+                    print(f"LOCATE-RUNS 共 {len(runs)} 段, 最长 {span * clus_bytes // 1048576}MB "
+                          f"(簇 {clus_bytes // 1024}KB)", file=sys.stderr)
+                    if span < need:
+                        die(f"最长连续段只有 {span * clus_bytes // 1024}KB, 不足 1MB")
+                    off = part_base + clus_off(best[0])
+                    # 自检: 读 1MB 统计 0x5A 占比 (顺便验证缓存已落盘)
                     buf = os.pread(fd, 1024 * 1024, off)
                     ratio = buf.count(0x5A) * 100.0 / len(buf)
-                    print(f"LOCATE-SELFTEST 首 1MB 0x5A 占比 {ratio:.1f}%")
+                    print(f"LOCATE-SELFTEST 目标 1MB 0x5A 占比 {ratio:.1f}%")
+                    if ratio < 99.0:
+                        die("自检失败: 目标区 0x5A 不足 99% (缓存未落盘或解析错位)")
                     print(f"LOCATE-OFFSET={off}")
+                    print(f"LOCATE-RUNLEN={span * clus_bytes}")
                     print(f"LOCATE-SIZE={data_len}")
                     return
             i += 32 * (1 + (data[i + 1] if etype == 0x85 else 0))

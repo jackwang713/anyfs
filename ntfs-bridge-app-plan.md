@@ -103,7 +103,7 @@ macOS 原生只能**只读**挂载 NTFS，且不支持 ext4/btrfs 等 Linux 文�
 | RTL9210B | USB3 | ✅ 通过 | 2026-11-02 实测：DKIOCUNMAP → 图案读回全零（TRIM-EXECUTED）；**SMART 经 sntrealtek 完整可读（Linux 侧）**。注：App 架构内（macOS 宿主）SMART 不可得——已穷举证伪：smartctl 无透传、QEMU scsi-generic 依赖 Linux SG_IO、SCSITaskLib 插件已注销（kIOReturnUnsupported）、苹果私有 SAT 路径仅插盘探测期瞬态可见（磁盘工具稳定"不支持"）；健康监控功能定为写入探针间接评估 |
 | ASM2364 | USB3 | ✅ | workaround 后有效 |
 | ASM2464PD | USB4/雷电 | ✅ 原生 | PCIe 直通，无桥接层问题 |
-| 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 金标准实测（`spike/trim-live-test.sh`）：exFAT 埋 32MB 图案→删除→DKIOCUNMAP→读回全零（TRIM-EXECUTED）。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
+| 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 多层物理证据（详见文末排障案例）：宿主整盘/分区设备 DKIOCUNMAP、QMP qemu-io discard、**完整生产链路 guest 全量 fstrim** 均读回全零。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。特性：**大批量 UNMAP 异步销账（~86s/167GB ≈ 2GB/s），1MB 小请求即时**，读回验证必须轮询等待。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
 
 > 注意：桥固件差异大，同一芯片不同固件行为可能不同 → App 内置每设备自检（见"六、TRIM"章），以实测绿灯为准，不再依赖芯片白名单。
 
@@ -285,6 +285,12 @@ NAND 实际擦除                              [实测：JMS583 fw0212 全形态
 ```
 
 这套探针源自实测验证方法论（exFAT 空闲区图案写删测），演进为内置功能。
+
+> **2026-11-10 方法论修正（铠侠实测连环假阴性后，详见文末排障案例）**：上述流程要成立，必须满足四个前提：
+> 1. **阳性对照校准**：先用宿主最短路径 UNMAP 验证该盘是 DZAT 行为（读回归零）；校准不过的盘属 Indeterminate 型，判据失效，只能灰灯弃权
+> 2. **读回必须宿主侧 F_NOCACHE**：QEMU 在 macOS 无 O_DIRECT（file-posix.c 降级为 O_DSYNC，全树无 F_NOCACHE），guest 内 dd 读回会命中宿主缓冲区里的旧图案 → 假阴性
+> 3. **读回必须轮询等待**：桥对大批量 UNMAP 异步销账（铠侠这块 ~86s/167GB ≈ 2GB/s；1MB 小请求即时），fstrim 后立即读回必出冤案
+> 4. **禁用 fstrim -o/-l 范围版**：guest exFAT FITRIM 范围路径报成功但目标区不归零（疑似驱动范围计算 bug）
 
 ### 各文件系统的养护策略（2026-11-01 实测定案）
 
@@ -706,3 +712,47 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 
 - App 可加防护：SMB 挂载掉线/未就绪时，若用户往原挂载点目录粘贴会写到**本机 SSD**（/Volumes 下残留目录），考虑卸载后删除空挂载点目录 + 状态提示
 - 性能问题排查顺序固化：先 guest 裸盘 dd 定盘体上限 → 再 guest 内文件级 dd 隔 SMB → 最后宿主 SMB 测；宿主侧低速先看数据源是否经剪贴板/无线
+
+### 排障案例：TRIM 金标准连环假阴性（2026-11-10，铠侠 EXCERIA PLUS 1TB 实测）
+
+**对象**：铠侠 EXCERIA PLUS 1TB（JMS583 桥，铠侠定制固件 55.01；盘芯 TC58NC1202 + 96 层 BiCS TLC），exFAT 分区（GPT 分区盘 disk7s2，832GB 已用）。
+
+**最终结论**：TRIM 端到端**真实有效**，任何一环（QEMU 补丁、macOS 整盘/分区设备、JMS583 桥、铠侠固件）都无故障；但**大批量 UNMAP 是异步销账**（~86s/167GB ≈ 2GB/s），1MB 小请求即时生效。
+
+**证据矩阵**（全部宿主 F_NOCACHE 读回 + 预校验安全闸）：
+
+| 路径 | 结果 |
+|---|---|
+| 宿主 DKIOCUNMAP → 整盘 /dev/rdisk7（1MB @832GB） | ✅ 全零 |
+| 宿主 DKIOCUNMAP → 分区 /dev/rdisk7s2（1MB，分区相对偏移） | ✅ 全零 |
+| QMP `qemu-io usbdisk0 discard`（验证运行中 QEMU 的补丁路径，绕过 guest） | ✅ 全零 |
+| guest 全量 fstrim 167GB（完整生产链路） | ✅ ~86s 后全零 |
+
+**连环假阴性（一天踩遍的判读陷阱，按发现顺序）**：
+
+1. **guest 内 dd 读回 → 假"被吞"**：QEMU 在 macOS 无 O_DIRECT（`file-posix.c:126` 降级为 `O_DSYNC`，全树无 F_NOCACHE），daemon 又未传 `cache=`（默认 writeback），guest 的读回命中 macOS 缓冲区里的旧图案。教训：**读回必须在宿主侧 F_NOCACHE 直读**（daemon 有 FDA，可行）。
+2. **fstrim 后立即读回 → 假"被吞"**：该桥对大批量 UNMAP 异步销账 ~86s，立即读回图案必在。教训：**读回必须轮询等待**（建议每 10s、最长 10min），归零时延本身是设备画像。
+3. **`fstrim -o OFF -l 1M` 报 "1048576 bytes trimmed" 但目标区 180s 不归零**：guest exFAT FITRIM 范围路径失效（疑似范围计算 bug；QMP delta 实验脚本已备 `guest-trim-delta.sh` 未跑）。教训：**检测与养护都禁用范围版 fstrim，只用全量**。
+4. **busybox blkdiscard 挂载中 O_EXCL 拒开（无 -f）**：定点实验改用 `fstrim -o/-l`（且 FITRIM 只碰空闲簇，安全性优于指哪打哪的 blkdiscard）。
+5. **`/tmp/anyfsd-serial.out` 是 fifo**：宿主直读会永久阻塞且与 daemon 的读取器抢数据；guest 结果必须写**卷内结果文件**经 SMB 读回（diag-run.sh 的老经验）。
+
+**规范层依据（TRIM 异步的合法性）**：三层协议都把 TRIM 定义为 hint，生效时机是固件实现细节——SCSI SBC：UNMAP 后内容 "may be indeterminate"，sg_unmap 手册 "unclear how long the UNMAP command will take"；ATA：DZAT 仅为可选能力位（Word 69 bit 14）；NVMe：DLFEAT 字段声明读回行为（000b=厂商自定/001b=全零/010b=全FF）。USB 桥层完全无规范约束（可 ACK 后内部排队）。Windows"优化驱动器"从不做读回验证正是这个原因——协议没给验证通道。
+
+**修正后的金标准流程**（工具均已落盘 spike/）：
+
+```
+① 阳性对照校准: 宿主最短路径 UNMAP → 读回; 非零=Indeterminate 盘 → 灰灯弃权
+② 埋 32MB 0x5A 图案 → exfat-locate.py 只读解析元数据定位 (免全盘扫描;
+   分区模式偏移与 guest 直通设备直接通用; 自检 <99% 图案拒绝动手)
+③ guest sync 落盘 → 宿主 F_NOCACHE 预校验图案物理在盘
+④ guest 删除 + 全量 fstrim (禁用 -o/-l)
+⑤ 宿主 F_NOCACHE 轮询读回 (10s×60), 记录归零时延
+工具: trim-live-test.sh (宿主一把梭) / guest-deep-trim.sh (anyFS 链路)
+     guest-trim-latency.sh (时延曲线) / guest-blkdiscard-test.sh / exfat-locate.py
+     unmap-live --unmap (带 99% 图案安全闸)
+```
+
+**产品结论（深度检测功能重新定位）**：
+
+- **通道状态灯用 QMP 计数器**（`unmap_ops/failed_unmap_operations`）：便宜、即时，覆盖 guest→QEMU→macOS 三层，适合做展开详情的常驻三态灯（✅ 有流量 / ❌ 被拒 / ● 未观察）
+- **NAND 级深度检测降级为可选诊断**（spike 工具或专家按钮）：~90s+ 轮询 + 写删 32MB，不适合做每设备强制自检；养护本身 fire-and-forget 即可（与 Windows 同哲学）
