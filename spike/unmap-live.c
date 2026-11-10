@@ -1,7 +1,9 @@
-// unmap-live.c — DKIOCUNMAP 活体验证 (三种模式)
+// unmap-live.c — DKIOCUNMAP 活体验证 (四种模式)
 //   unmap-live <dev>                  扫描图案 -> 发 UNMAP -> 读回 (默认全流程)
 //   unmap-live <dev> --scan-only      只扫描并打印图案偏移 (供 VM 测试用)
 //   unmap-live <dev> --verify <off>   只读回 1MB 统计字节构成
+//   unmap-live <dev> --unmap <off>    对指定偏移发 UNMAP -> 读回 (带安全闸:
+//                                     目标区必须 >99% 是 0x5A 图案, 否则拒绝动手)
 // 用法: sudo ./unmap-live /dev/rdisk2 [模式]
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,6 +108,7 @@ int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "/dev/rdisk2";
     int scanOnly = argc > 2 && !strcmp(argv[2], "--scan-only");
     int verifyMode = argc > 3 && !strcmp(argv[2], "--verify");
+    int unmapMode = argc > 3 && !strcmp(argv[2], "--unmap");
 
     int fd = open(path, verifyMode ? O_RDONLY : O_RDWR);
     if (fd < 0) {
@@ -119,6 +122,36 @@ int main(int argc, char **argv) {
 
     if (verifyMode) {
         verify(fd, strtoull(argv[3], NULL, 10), buf);
+        return 0;
+    }
+
+    if (unmapMode) {
+        // 安全闸: UNMAP 会丢弃数据, 动手前必须确认目标区确实是我们埋的图案
+        uint64_t off = strtoull(argv[3], NULL, 10);
+        if (pread(fd, buf, CHUNK, off) != CHUNK) {
+            fprintf(stderr, "预读失败: %s\n", strerror(errno));
+            return 1;
+        }
+        uint64_t pat = 0;
+        for (size_t i = 0; i < CHUNK; i++)
+            if (buf[i] == PATTERN) pat++;
+        printf("LIVE-PRECHECK 目标区 0x5A 占比 %.1f%%\n", pat * 100.0 / CHUNK);
+        if (pat < CHUNK * 99 / 100) {
+            printf("LIVE-VERDICT ABORT — 目标区不是图案, 拒绝 UNMAP (定位有误?)\n");
+            return 1;
+        }
+        dk_extent_t extent = { .offset = off, .length = CHUNK };
+        dk_unmap_t um;
+        memset(&um, 0, sizeof um);
+        um.extents = &extent;
+        um.extentsCount = 1;
+        if (ioctl(fd, DKIOCUNMAP, &um) < 0) {
+            printf("LIVE-UNMAP error: %s (%d) — macOS 拒绝执行\n", strerror(errno), errno);
+            return 1;
+        }
+        printf("LIVE-UNMAP ioctl 成功 (macOS 已受理)\n");
+        verify(fd, off, buf);
+        close(fd);
         return 0;
     }
 

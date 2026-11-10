@@ -103,6 +103,7 @@ macOS 原生只能**只读**挂载 NTFS，且不支持 ext4/btrfs 等 Linux 文�
 | RTL9210B | USB3 | ✅ 通过 | 2026-11-02 实测：DKIOCUNMAP → 图案读回全零（TRIM-EXECUTED）；**SMART 经 sntrealtek 完整可读（Linux 侧）**。注：App 架构内（macOS 宿主）SMART 不可得——已穷举证伪：smartctl 无透传、QEMU scsi-generic 依赖 Linux SG_IO、SCSITaskLib 插件已注销（kIOReturnUnsupported）、苹果私有 SAT 路径仅插盘探测期瞬态可见（磁盘工具稳定"不支持"）；健康监控功能定为写入探针间接评估 |
 | ASM2364 | USB3 | ✅ | workaround 后有效 |
 | ASM2464PD | USB4/雷电 | ✅ 原生 | PCIe 直通，无桥接层问题 |
+| 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 金标准实测（`spike/trim-live-test.sh`）：exFAT 埋 32MB 图案→删除→DKIOCUNMAP→读回全零（TRIM-EXECUTED）。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
 
 > 注意：桥固件差异大，同一芯片不同固件行为可能不同 → App 内置每设备自检（见"六、TRIM"章），以实测绿灯为准，不再依赖芯片白名单。
 
