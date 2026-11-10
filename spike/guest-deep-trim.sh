@@ -75,12 +75,13 @@ echo "预校验通过: 图案物理在盘 ($((SECONDS - T0))s)"
 # (extent 需 ≥2MB: 前 1MB 给对照组, 后 1MB 留给第 5 步看 guest 删除路径)
 VOFF=$OFF
 if [ "$((LEN * BS))" -ge 2097152 ]; then
-    echo "== 3.5/5 对照组: QMP 单条 1MB discard (绕过 guest 文件系统) =="
-    # 注意: 不能吞输出 — QMP 应答里 {"error":...} 才是真凶线索 (踩过: >/dev/null 误判)
-    CTRL_OUT=$( ( echo '{"execute":"qmp_capabilities"}'; sleep 0.3
-      echo "{\"execute\":\"qemu-io\",\"arguments\":{\"device\":\"usbdisk0\",\"command\":\"discard $OFF 1048576\"}}"
-      sleep 1 ) | nc -U /tmp/anyfsd.qmp )
-    echo "QMP 应答: $(echo "$CTRL_OUT" | tail -1)"
+    echo "== 3.5/5 对照组: guest 块层直发 blkdiscard 1MB (绕过文件系统) =="
+    # QMP qemu-io 在 QEMU 11 已移除 (CommandNotFound 踩过) → 改用 guest blkdiscard;
+    # -f = 挂载中强制; 目标是 FIEMAP+预校验过的图案区, 安全; busybox blkdiscard 支持 -f
+    # /proc/mounts 反查设备名 (findmnt 在 busybox 不一定有)
+    printf 'D=$(awk -v m=/mnt/%s "\$2==m{print \$1}" /proc/mounts); blkdiscard -f -o %s -l 1048576 $D; echo CTRL-DONE-%s rc=$?\n' \
+        "$SHARE" "$OFF" "$MARK" > "$PIPE.in"
+    wait_marker "CTRL-DONE-$MARK" 30
     sleep 2
     ./unmap-live "/dev/r$PART" --verify "$OFF"
     VOFF=$((OFF + 1048576))   # 第 5 步改看后 1MB (guest 删除路径的窗口)
