@@ -11,6 +11,9 @@ import Foundation
     func releaseAll(withReply reply: @escaping (NSNumber) -> Void)
     func trimNow(withReply reply: @escaping (NSString) -> Void)
     func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
+    func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func consoleTail(withReply reply: @escaping (NSString) -> Void)
+    func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -69,10 +72,21 @@ case "trim":
         print("fstrim 执行中 (全部已挂载分区, 可能需数秒~数分钟)...")
         proxy.trimNow { s in print("trim: \(s)"); sem.signal() }
     }
+case "console":
+    // guest 串口控制台末尾 60 行 (诊断控制台活性/卡死)
+    proxy.consoleTail { s in print(s as String); sem.signal() }
+case "inject":
+    // 向 guest 控制台注入一行命令 (走 daemon 同路径, 免 sudo)
+    let cmdline = CommandLine.arguments.dropFirst(2).joined(separator: " ")
+    guard !cmdline.isEmpty else { print("用法: anyfsctl inject <命令>"); exit(2) }
+    proxy.inject(cmdline as NSString) { ok in
+        print(ok.boolValue ? "inject: 已注入" : "inject: 失败 (无就绪 VM)")
+        sem.signal()
+    }
 case "quit":
     proxy.appQuit { _ in print("quit: 已通知 daemon 收尸自毁"); sem.signal() }
 default:
-    print("用法: anyfsctl status|list|takeover <分区...>|release|trim|quit")
+    print("用法: anyfsctl status|list|takeover <分区...>|release|trim|console|inject <命令>|quit")
     exit(2)
 }
 sem.wait()

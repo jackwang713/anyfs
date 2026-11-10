@@ -140,6 +140,13 @@ final class SerialPipe {
         guard offset < transcript.count else { return "" }
         return String(transcript[transcript.index(transcript.startIndex, offsetBy: offset)...])
     }
+
+    // 末尾 N 行 (anyfsctl console 诊断用)
+    func tail(_ maxLines: Int) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return transcript.split(separator: "\n", omittingEmptySubsequences: false)
+            .suffix(maxLines).joined(separator: "\n")
+    }
 }
 
 // MARK: - QMP 客户端 (QEMU monitor JSON 协议)
@@ -1005,6 +1012,19 @@ final class DiskManager {
         return runs
     }
 
+    // guest 串口控制台末尾 N 行 (anyfsctl console 诊断用)
+    func consoleTail() -> String {
+        guard let q = qemu else { return "(无活动 VM)" }
+        return q.serial.tail(60)
+    }
+
+    // 向 guest 控制台注入一行命令 (anyfsctl inject; 与启动注入同路径, 免 sudo)
+    func inject(_ cmd: String) -> Bool {
+        guard let q = qemu, q.state == "ready" else { return false }
+        q.serial.send(cmd + "\n")
+        return true
+    }
+
     // exFAT 原生养护入口 (XPC): 卸载 → UNMAP 全部空闲段 → 挂回
     func trimNative(_ bsd: String, reply: @escaping (String) -> Void) {
         DispatchQueue(label: "trim-native").async {
@@ -1082,6 +1102,8 @@ final class DiskManager {
     func trimNow(withReply reply: @escaping (NSString) -> Void)
     func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func consoleTail(withReply reply: @escaping (NSString) -> Void)
+    func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -1133,6 +1155,15 @@ final class XPCService: NSObject, AnyFSDaemonProtocol, NSXPCListenerDelegate {
     // exFAT 原生养护 (卸载→DKIOCUNMAP→挂回, 不经 VM)
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
         DiskManager.shared.trimNative(bsd as String) { s in reply(s as NSString) }
+    }
+    // guest 串口控制台末尾输出 (诊断: 控制台是否掉回登录态/卡死, 一眼定位)
+    func consoleTail(withReply reply: @escaping (NSString) -> Void) {
+        let tail = DiskManager.shared.consoleTail()
+        reply(tail as NSString)
+    }
+    // 串口注入 (诊断/脚本用; 与启动注入同路径, 免 sudo)
+    func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void) {
+        reply(NSNumber(value: DiskManager.shared.inject(cmd as String)))
     }
     // App 退出联动: 干净收尸完成后才回话 (App 端显示"正在关闭…"等待), 然后 daemon 自毁
     func appQuit(withReply reply: @escaping (NSNumber) -> Void) {
