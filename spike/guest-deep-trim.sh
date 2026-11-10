@@ -45,12 +45,13 @@ echo "== 2/5 guest 内 filefrag 定位 (FIEMAP, 文件系统无关, 免扫描) =
 # bundle 二进制不在 guest PATH 里, 必须用绝对路径 (init.sh 起 smbd 同理);
 # 结果经卷内结果文件回传 (串口 fifo 宿主不可读)
 rm -f "$VOL/$RESULT"
-printf 'sync; /opt/usr/sbin/filefrag -v /mnt/%s/.deep-trim-pattern > /mnt/%s/%s 2>&1; echo DEEP:LOCATED >> /mnt/%s/%s; sync\n' \
+printf 'sync; /opt/usr/sbin/filefrag -e -v /mnt/%s/.deep-trim-pattern > /mnt/%s/%s 2>&1; echo DEEP:LOCATED >> /mnt/%s/%s; sync\n' \
     "$SHARE" "$SHARE" "$RESULT" "$SHARE" "$RESULT" > "$PIPE.in"
 wait_marker "DEEP:LOCATED" 30
 BS=$(sed -n 's/.*blocks of \([0-9]*\) bytes.*/\1/p' "$VOL/$RESULT" | head -1)
-# extent 行固定列位: idx: lo.. hi: physlo.. physhi: len: [expected:] flags → 取 $4/$6
-set -- $(awk '/^ *[0-9]+:/ && $2 ~ /\.\./ { p=$4; sub(/\.\.$/,"",p); l=$6; sub(/:$/,"",l); print p, l; exit }' "$VOL/$RESULT")
+# extent 行固定列位: idx: lo.. hi: physlo.. physhi: len: [expected:] flags → 取 $4/$6;
+# 选第一个 ≥1MB 的连续 extent (文件可能碎成多段, 首段可能不足 1MB)
+set -- $(awk -v bs="$BS" '/^ *[0-9]+:/ && $2 ~ /\.\./ { p=$4; sub(/\.\.$/,"",p); l=$6; sub(/:$/,"",l); if (l*bs>=1048576) { print p, l; exit } }' "$VOL/$RESULT")
 PHYS=${1:-}; LEN=${2:-}
 if [ -n "$BS" ] && [ -n "$PHYS" ] && [ -n "$LEN" ] && [ "$((LEN * BS))" -ge 1048576 ] 2>/dev/null; then
     OFF=$((PHYS * BS))

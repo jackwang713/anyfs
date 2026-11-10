@@ -32,11 +32,11 @@ sync
 
 echo "== 2/6 guest 内 filefrag 定位 (FIEMAP) =="
 rm -f "$VOL/$RESULT"
-printf 'sync; /opt/usr/sbin/filefrag -v /mnt/%s/.bridge-pattern > /mnt/%s/%s 2>&1; echo BR:LOCATED >> /mnt/%s/%s; sync\n' \
+printf 'sync; /opt/usr/sbin/filefrag -e -v /mnt/%s/.bridge-pattern > /mnt/%s/%s 2>&1; echo BR:LOCATED >> /mnt/%s/%s; sync\n' \
     "$SHARE" "$SHARE" "$RESULT" "$SHARE" "$RESULT" > "$PIPE.in"
 wait_marker "BR:LOCATED" 30
 BS=$(sed -n 's/.*blocks of \([0-9]*\) bytes.*/\1/p' "$VOL/$RESULT" | head -1)
-set -- $(awk '/^ *[0-9]+:/ && $2 ~ /\.\./ { p=$4; sub(/\.\.$/,"",p); l=$6; sub(/:$/,"",l); print p, l; exit }' "$VOL/$RESULT")
+set -- $(awk -v bs="$BS" '/^ *[0-9]+:/ && $2 ~ /\.\./ { p=$4; sub(/\.\.$/,"",p); l=$6; sub(/:$/,"",l); if (l*bs>=1048576) { print p, l; exit } }' "$VOL/$RESULT")
 PHYS=${1:-}; LEN=${2:-}
 [ -n "$BS" ] && [ -n "$PHYS" ] && [ -n "$LEN" ] && [ "$((LEN * BS))" -ge 1048576 ] 2>/dev/null \
     || { echo "FAIL: filefrag 解析失败:"; cat "$VOL/$RESULT"; rm -f "$VOL/.bridge-pattern" "$VOL/$RESULT"; exit 1; }
