@@ -73,21 +73,34 @@ echo "预校验通过: 图案物理在盘 ($((SECONDS - T0))s)"
 if [ "$FAST" = 1 ]; then
     echo "== 4/5 guest 删除 (在线 discard, 不全量 fstrim) =="
     printf 'rm -f /mnt/%s/.deep-trim-pattern; sync; echo DEEP:DELETE-DONE-%s\n' "$SHARE" "$MARK" > "$PIPE.in"
-    wait_marker "DEEP:DELETE-DONE-$MARK" 60
 else
     echo "== 4/5 guest 删除 + 全量 fstrim =="
     printf 'rm -f /mnt/%s/.deep-trim-pattern; sync; fstrim -v /mnt/%s; echo DEEP:FSTRIM-DONE-%s\n' "$SHARE" "$SHARE" "$MARK" > "$PIPE.in"
+fi
+
+# QMP unmap_ops 打点: UNMAP 离开 QEMU 的时刻 vs NAND 归零的时刻, 切分延迟归属
+qmp_ops() {
+    ( echo '{"execute":"qmp_capabilities"}'; sleep 0.2; echo '{"execute":"query-blockstats"}'; sleep 0.3 ) \
+      | nc -U /tmp/anyfsd.qmp 2>/dev/null | tail -1 \
+      | sed -n 's/.*"unmap_operations": \([0-9]*\).*/\1/p' | head -1
+}
+OPS0=$(qmp_ops); OPS0=${OPS0:-0}
+
+if [ "$FAST" = 1 ]; then
+    wait_marker "DEEP:DELETE-DONE-$MARK" 60
+else
     wait_marker "DEEP:FSTRIM-DONE-$MARK" 600
 fi
 
-echo "== 5/5 宿主 F_NOCACHE 读回判决 =="
+echo "== 5/5 宿主 F_NOCACHE 读回判决 + QMP 打点 =="
 # fast 模式预期秒级归零, 加密轮询 (2s); full 模式按异步销账量级 (10s)
 if [ "$FAST" = 1 ]; then STEP=2; N=90; else STEP=10; N=60; fi
 for i in $(seq 0 $N); do
     [ "$i" -gt 0 ] && sleep $STEP
     OUT=$(./unmap-live "/dev/r$PART" --verify "$OFF")
     Z=$(echo "$OUT" | sed -n 's/.*zero=\([0-9]*\).*/\1/p')
-    echo "T+$((i * STEP))s: zero=$Z/1048576"
+    OPS=$(qmp_ops); OPS=${OPS:-$OPS0}
+    echo "T+$((i * STEP))s: zero=$Z/1048576 unmap_ops=+$((OPS - OPS0))"
     [ "$Z" = "1048576" ] && { echo "VERDICT: TRIM-EXECUTED (归零时延 $((i * STEP))s)"; break; }
     [ "$i" = "$N" ] && echo "VERDICT: TRIM-SWALLOWED? ($((N * STEP))s 仍未归零)"
 done
