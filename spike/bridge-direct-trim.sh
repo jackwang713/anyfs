@@ -15,15 +15,16 @@ SHARE=$(anyfsctl share "$PART")
 VOL="/Volumes/$SHARE"
 [ -d "$VOL" ] || { echo "FAIL: $VOL 不存在 (App 侧 SMB 挂载了吗?)"; exit 1; }
 PIPE=/tmp/anyfsd-serial
-RESULT=.bridge-trim-result.txt
+MARK=$$   # 控制台标记后缀, 防多轮误读陈旧标记
 [ -x ./unmap-live ] || clang -O2 -o unmap-live unmap-live.c
 
+# 控制台信号旗 (不用卷内结果文件 — smbfs 目录缓存对带外新建文件刷新不可靠)
 wait_marker() {
-    for i in $(seq 1 $(( $2 / 3 ))); do
-        sleep 3
-        [ -f "$VOL/$RESULT" ] && grep -q "$1" "$VOL/$RESULT" 2>/dev/null && return 0
+    for i in $(seq 1 $(( $2 / 2 ))); do
+        sleep 2
+        anyfsctl console 2>/dev/null | grep -qF "$1" && return 0
     done
-    echo "FAIL: 等不到 $1 (${2}s 超时), 手工查看 $VOL/$RESULT"; exit 1
+    echo "FAIL: 等不到 $1 (${2}s 超时), anyfsctl console 手工查看"; exit 1
 }
 
 echo "== 1/6 经 SMB 埋图案: 32MB 0x5A =="
@@ -31,18 +32,17 @@ python3 -c "import sys; sys.stdout.buffer.write(b'\x5a'*32*1024*1024)" > "$VOL/.
 sync
 
 echo "== 2/6 guest 内 filefrag 定位 (FIEMAP) =="
-rm -f "$VOL/$RESULT"
-printf 'sync; /opt/usr/sbin/filefrag -e -v /mnt/%s/.bridge-pattern > /mnt/%s/%s 2>&1; echo BR:LOCATED >> /mnt/%s/%s; sync\n' \
-    "$SHARE" "$SHARE" "$RESULT" "$SHARE" "$RESULT" > "$PIPE.in"
-wait_marker "BR:LOCATED" 30
-BS=$(sed -n 's/.*blocks of \([0-9]*\) bytes.*/\1/p' "$VOL/$RESULT" | head -1)
-set -- $(awk -v bs="$BS" '/^ *[0-9]+:/ && $2 ~ /\.\./ { p=$4; sub(/\.\.$/,"",p); l=$6; sub(/:$/,"",l); if (l*bs>=1048576) { print p, l; exit } }' "$VOL/$RESULT")
+printf 'sync; /opt/usr/sbin/filefrag -e -v /mnt/%s/.bridge-pattern; echo BR:LOCATED-%s\n' \
+    "$SHARE" "$MARK" > "$PIPE.in"
+wait_marker "BR:LOCATED-$MARK" 30
+TABLE=$(anyfsctl console | awk '/filefrag -e -v/{n=NR} {buf[NR]=$0} END{for(i=n+1;i<=NR;i++) print buf[i]}')
+BS=$(echo "$TABLE" | sed -n 's/.*blocks of \([0-9]*\) bytes.*/\1/p' | head -1)
+set -- $(echo "$TABLE" | awk -v bs="$BS" '/^ *[0-9]+:/ && $2 ~ /\.\./ { p=$4; sub(/\.\.$/,"",p); l=$6; sub(/:$/,"",l); if (l*bs>=1048576) { print p, l; exit } }')
 PHYS=${1:-}; LEN=${2:-}
 [ -n "$BS" ] && [ -n "$PHYS" ] && [ -n "$LEN" ] && [ "$((LEN * BS))" -ge 1048576 ] 2>/dev/null \
-    || { echo "FAIL: filefrag 解析失败:"; cat "$VOL/$RESULT"; rm -f "$VOL/.bridge-pattern" "$VOL/$RESULT"; exit 1; }
+    || { echo "FAIL: filefrag 解析失败:"; echo "$TABLE"; rm -f "$VOL/.bridge-pattern"; exit 1; }
 OFF=$((PHYS * BS))
 echo "FIEMAP 定位: 物理块 $PHYS × ${BS}B = 分区偏移 $OFF (extent 连续 $((LEN * BS / 1048576))MB)"
-rm -f "$VOL/$RESULT"
 
 echo "== 3/6 预校验: 图案物理在盘 (F_NOCACHE) =="
 PRE=$(./unmap-live "/dev/r$PART" --verify "$OFF")
