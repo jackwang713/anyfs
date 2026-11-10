@@ -32,20 +32,25 @@ echo "== 1/5 经 SMB 埋图案: 32MB 0x5A =="
 python3 -c "import sys; sys.stdout.buffer.write(b'\x5a'*32*1024*1024)" > "$VOL/.deep-trim-pattern"
 sync
 
-echo "== 2/5 宿主侧定位 (只读解析 exFAT 元数据; 非 exFAT 回退扫描) =="
-LOCATE=$(python3 ./exfat-locate.py "/dev/r$PART" .deep-trim-pattern 2>&1 | tee /dev/stderr)
-OFF=$(echo "$LOCATE" | sed -n 's/^LOCATE-OFFSET=//p')
-if [ -z "$OFF" ]; then
-    # 回退: 整盘扫描 (unmap-live 扫最大 MS Basic Data 分区, NTFS 同 GUID 也覆盖).
-    # 扫描返回整盘绝对偏移, 分区直通设备需减去分区起点 (LIVE-PART 行有 LBA 起点)
-    PARENT=$(echo "$PART" | sed -E 's/s[0-9]+$//')
-    echo "(非 exFAT, 回退扫描 $PARENT, 大分区需数分钟)"
-    SCAN=$(./unmap-live "/dev/r$PARENT" --scan-only | tee /dev/stderr)
-    ABS=$(echo "$SCAN" | sed -n 's/^LIVE-FOUND 图案块 @ 偏移 \([0-9]*\).*/\1/p')
-    PLBA=$(echo "$SCAN" | sed -n 's/^LIVE-PART exFAT 分区: LBA \([0-9]*\)-.*/\1/p')
-    [ -n "$ABS" ] && [ -n "$PLBA" ] && OFF=$((ABS - PLBA * 512))
+echo "== 2/5 guest 内 filefrag 定位 (FIEMAP, 文件系统无关, 免扫描) =="
+# filefrag 的 physical offset 相对被挂载设备 (= 直通分区) — 与宿主 /dev/r分区 寻址直接通用
+# 需要 bundle 里有 e2fsprogs (filefrag); 结果经卷内结果文件回传 (串口 fifo 宿主不可读)
+rm -f "$VOL/$RESULT"
+printf 'sync; filefrag -v /mnt/%s/.deep-trim-pattern > /mnt/%s/%s 2>&1; echo DEEP:LOCATED >> /mnt/%s/%s; sync\n' \
+    "$SHARE" "$SHARE" "$RESULT" "$SHARE" "$RESULT" > "$PIPE.in"
+wait_marker "DEEP:LOCATED" 30
+BS=$(sed -n 's/.*blocks of \([0-9]*\) bytes.*/\1/p' "$VOL/$RESULT" | head -1)
+# extent 行固定列位: idx: lo.. hi: physlo.. physhi: len: [expected:] flags → 取 $4/$6
+set -- $(awk '/^ *[0-9]+:/ && $2 ~ /\.\./ { p=$4; sub(/\.\.$/,"",p); l=$6; sub(/:$/,"",l); print p, l; exit }' "$VOL/$RESULT")
+PHYS=${1:-}; LEN=${2:-}
+if [ -n "$BS" ] && [ -n "$PHYS" ] && [ -n "$LEN" ] && [ "$((LEN * BS))" -ge 1048576 ] 2>/dev/null; then
+    OFF=$((PHYS * BS))
+    echo "FIEMAP 定位: 物理块 $PHYS × ${BS}B = 分区偏移 $OFF (extent 连续 $((LEN * BS / 1048576))MB)"
+else
+    echo "FAIL: filefrag 解析失败 (bundle 太旧缺 e2fsprogs? 重烧 bundle):"; cat "$VOL/$RESULT"
+    rm -f "$VOL/.deep-trim-pattern" "$VOL/$RESULT"; exit 1
 fi
-[ -n "$OFF" ] || { echo "FAIL: 定位失败"; rm -f "$VOL/.deep-trim-pattern"; exit 1; }
+rm -f "$VOL/$RESULT"
 
 echo "== 3/5 guest sync 落盘 → 宿主 F_NOCACHE 预校验 =="
 rm -f "$VOL/$RESULT"

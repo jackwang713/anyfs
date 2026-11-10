@@ -742,8 +742,10 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 
 ```
 ① 阳性对照校准: 宿主最短路径 UNMAP → 读回; 非零=Indeterminate 盘 → 灰灯弃权
-② 埋 32MB 0x5A 图案 → exfat-locate.py 只读解析元数据定位 (免全盘扫描;
-   分区模式偏移与 guest 直通设备直接通用; 自检 <99% 图案拒绝动手)
+② 埋 32MB 0x5A 图案 → 定位物理偏移 (免全盘扫描):
+   guest 链路用 filefrag (FIEMAP, 问内核要 extents, 文件系统无关,
+   分区直通场景 physical offset 与宿主分区设备寻址直接通用);
+   宿主裸机链路用 exfat-locate.py 只读解析元数据 (自检 <99% 图案拒绝动手)
 ③ guest sync 落盘 → 宿主 F_NOCACHE 预校验图案物理在盘
 ④ guest 删除 + 全量 fstrim (禁用 -o/-l)
 ⑤ 宿主 F_NOCACHE 轮询读回 (10s×60), 记录归零时延
