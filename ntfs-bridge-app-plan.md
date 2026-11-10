@@ -100,7 +100,8 @@ macOS 原生只能**只读**挂载 NTFS，且不支持 ext4/btrfs 等 Linux 文�
 | 芯片 | 接口 | UNMAP 实测 | 说明 |
 |---|---|---|---|
 | JMS583 (fw0212) | USB3 | ✅ 通过 | **平反**：经 SG_IO 全形态 UNMAP 实测通过（单/多描述符/256MB/63 描述符批量），"吞 TRIM"是旧固件冤案；SMART 不可读（macOS/Linux 均失败） |
-| RTL9210B | USB3 | ✅ 通过 | 2026-11-02 实测：DKIOCUNMAP → 图案读回全零（TRIM-EXECUTED）；**SMART 经 sntrealtek 完整可读（Linux 侧）**。注：App 架构内（macOS 宿主）SMART 不可得——已穷举证伪：smartctl 无透传、QEMU scsi-generic 依赖 Linux SG_IO、SCSITaskLib 插件已注销（kIOReturnUnsupported）、苹果私有 SAT 路径仅插盘探测期瞬态可见（磁盘工具稳定"不支持"）；健康监控功能定为写入探针间接评估。2026-11-10 新方法论复测（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：TRIM-EXECUTED，**大批量 UNMAP 异步销账 ~30-40s/170-180GB（两次实测）**（约为 JMS583 的 3 倍） |
+| RTL9210B | USB3 | ✅ 通过 | 2026-11-02 实测：DKIOCUNMAP → 图案读回全零（TRIM-EXECUTED）；**SMART 经 sntrealtek 完整可读（Linux 侧）**。注：App 架构内（macOS 宿主）SMART 不可得——已穷举证伪：smartctl 无透传、QEMU scsi-generic 依赖 Linux SG_IO、SCSITaskLib 插件已注销（kIOReturnUnsupported）、苹果私有 SAT 路径仅插盘探测期瞬态可见（磁盘工具稳定"不支持"）；健康监控功能定为写入探针间接评估。2026-11-10 新方法论复测（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：TRIM-EXECUTED，**大批量 UNMAP 异步销账 ~30s/180GB ≈ 6GB/s** |
+| JMS583（第三方硬盘盒 + 致态 Ti600 QLC） | USB3 | ✅ 通过 | 2026-11-10 新方法论（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：完整生产链路 TRIM-EXECUTED，异步销账 ~40s/171GB。与铠侠成品 PSSD（同芯片不同固件 55.01，~86s/167GB）时延差一倍多——归零时延是固件画像非芯片属性 |
 | ASM2364 | USB3 | ✅ | workaround 后有效 |
 | ASM2464PD | USB4/雷电 | ✅ 原生 | PCIe 直通，无桥接层问题 |
 | 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 多层物理证据（详见文末排障案例）：宿主整盘/分区设备 DKIOCUNMAP、QMP qemu-io discard、**完整生产链路 guest 全量 fstrim** 均读回全零。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。特性：**大批量 UNMAP 异步销账（~86s/167GB ≈ 2GB/s），1MB 小请求即时**，读回验证必须轮询等待。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
