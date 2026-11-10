@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
     int verifyMode = argc > 3 && !strcmp(argv[2], "--verify");
     int unmapMode = argc > 3 && !strcmp(argv[2], "--unmap");
 
-    int fd = open(path, verifyMode ? O_RDONLY : O_RDWR);
+    int fd = open(path, (verifyMode || scanOnly) ? O_RDONLY : O_RDWR);
     if (fd < 0) {
         fprintf(stderr, "open %s: %s\n", path, strerror(errno));
         return 1;

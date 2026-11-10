@@ -32,9 +32,19 @@ echo "== 1/5 经 SMB 埋图案: 32MB 0x5A =="
 python3 -c "import sys; sys.stdout.buffer.write(b'\x5a'*32*1024*1024)" > "$VOL/.deep-trim-pattern"
 sync
 
-echo "== 2/5 宿主侧定位 (只读解析 exFAT 元数据) =="
-LOCATE=$(python3 ./exfat-locate.py "/dev/r$PART" .deep-trim-pattern | tee /dev/stderr)
+echo "== 2/5 宿主侧定位 (只读解析 exFAT 元数据; 非 exFAT 回退扫描) =="
+LOCATE=$(python3 ./exfat-locate.py "/dev/r$PART" .deep-trim-pattern 2>&1 | tee /dev/stderr)
 OFF=$(echo "$LOCATE" | sed -n 's/^LOCATE-OFFSET=//p')
+if [ -z "$OFF" ]; then
+    # 回退: 整盘扫描 (unmap-live 扫最大 MS Basic Data 分区, NTFS 同 GUID 也覆盖).
+    # 扫描返回整盘绝对偏移, 分区直通设备需减去分区起点 (LIVE-PART 行有 LBA 起点)
+    PARENT=$(echo "$PART" | sed -E 's/s[0-9]+$//')
+    echo "(非 exFAT, 回退扫描 $PARENT, 大分区需数分钟)"
+    SCAN=$(./unmap-live "/dev/r$PARENT" --scan-only | tee /dev/stderr)
+    ABS=$(echo "$SCAN" | sed -n 's/^LIVE-FOUND 图案块 @ 偏移 \([0-9]*\).*/\1/p')
+    PLBA=$(echo "$SCAN" | sed -n 's/^LIVE-PART exFAT 分区: LBA \([0-9]*\)-.*/\1/p')
+    [ -n "$ABS" ] && [ -n "$PLBA" ] && OFF=$((ABS - PLBA * 512))
+fi
 [ -n "$OFF" ] || { echo "FAIL: 定位失败"; rm -f "$VOL/.deep-trim-pattern"; exit 1; }
 
 echo "== 3/5 guest sync 落盘 → 宿主 F_NOCACHE 预校验 =="
