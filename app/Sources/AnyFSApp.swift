@@ -60,7 +60,36 @@ final class DaemonClient: ObservableObject {
     @Published var trimming: Set<String> = []      // 养护在途的分区
     @Published var quitting = false                // 退出流程在途 (等 VM 关闭)
     @Published var lastError = ""
-    @Published var notice = ""                     // 中性提示 (养护结果等)
+    @Published var notice = ""                     // 中性提示 (全局操作结果)
+    @Published var trimResults: [String: String] = [:]  // 分区级养护结果 (bsd → 文案, 自动消失)
+
+    // 消息自动消失: 代次守卫, 新消息挤掉旧的计时 (成功 6s / 错误 8s)
+    private var errorGen = 0, noticeGen = 0, trimGen: [String: Int] = [:]
+    func setError(_ s: String) {
+        lastError = s; errorGen += 1
+        let g = errorGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, self.errorGen == g else { return }
+            self.lastError = ""
+        }
+    }
+    func setNotice(_ s: String) {
+        notice = s; noticeGen += 1
+        let g = noticeGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            guard let self, self.noticeGen == g else { return }
+            self.notice = ""
+        }
+    }
+    private func setTrimResult(_ bsd: String, _ s: String) {
+        trimResults[bsd] = s
+        let g = (trimGen[bsd] ?? 0) + 1
+        trimGen[bsd] = g
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, self.trimGen[bsd] == g else { return }
+            self.trimResults.removeValue(forKey: bsd)
+        }
+    }
 
     var busy: Bool { !pending.isEmpty || !trimming.isEmpty || quitting }
     var anyActive: Bool { parts.contains(where: \.active) }
@@ -80,12 +109,12 @@ final class DaemonClient: ObservableObject {
         let c = NSXPCConnection(machServiceName: "com.anyfs.daemon", options: .privileged)
         c.remoteObjectInterface = NSXPCInterface(with: AnyFSDaemonProtocol.self)
         c.interruptionHandler = { [weak self] in
-            Task { @MainActor in self?.lastError = "daemon 连接中断, 重连中" }
+            Task { @MainActor in self?.setError("daemon 连接中断, 重连中") }
         }
         c.resume()
         conn = c
         proxy = c.remoteObjectProxyWithErrorHandler { [weak self] err in
-            Task { @MainActor in self?.lastError = err.localizedDescription }
+            Task { @MainActor in self?.setError(err.localizedDescription) }
         } as? AnyFSDaemonProtocol
     }
 
@@ -126,7 +155,7 @@ final class DaemonClient: ObservableObject {
                     if (s as String).hasPrefix("ready") {
                         self?.mountShare(p, open: true)
                     } else {
-                        self?.lastError = s as String
+                        self?.setError(s as String)
                     }
                     self?.refresh()
                 }
@@ -140,7 +169,7 @@ final class DaemonClient: ObservableObject {
                 Task { @MainActor in
                     self?.pending.subtract(affected)
                     let r = s as String
-                    if !r.hasPrefix("released") { self?.lastError = r }
+                    if !r.hasPrefix("released") { self?.setError(r) }
                     self?.refresh()
                     // 部分释放后 daemon 已卸所有 anyFS SMB 挂载, 静默重挂剩余分区
                     for part in remaining { self?.mountShare(part, open: false) }
@@ -167,7 +196,7 @@ final class DaemonClient: ObservableObject {
             Task { @MainActor in
                 self?.trimming.remove(p.id)
                 let r = s as String
-                if r.hasPrefix("failed") { self?.lastError = r } else { self?.notice = r }
+                self?.setTrimResult(p.id, r)
                 self?.refresh()
             }
         }
@@ -179,7 +208,7 @@ final class DaemonClient: ObservableObject {
         proxy?.prepareMountpoint(p.shareName as NSString) { [weak self] path in
             Task { @MainActor in
                 let mp = path as String
-                guard mp.hasPrefix("/") else { self?.lastError = mp; return }
+                guard mp.hasPrefix("/") else { self?.setError(mp); return }
                 let t = Process()
                 t.executableURL = URL(fileURLWithPath: "/sbin/mount_smbfs")
                 t.arguments = ["//GUEST@anyFS.local/\(p.shareName)", mp]
@@ -191,7 +220,7 @@ final class DaemonClient: ObservableObject {
                     let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                     // EEXIST (已挂载) 不算错误
                     if !e.contains("File exists") {
-                        self?.lastError = "SMB 挂载失败: \(e.trimmingCharacters(in: .whitespacesAndNewlines))"
+                        self?.setError("SMB 挂载失败: \(e.trimmingCharacters(in: .whitespacesAndNewlines))")
                     }
                 }
                 if open { NSWorkspace.shared.open(URL(fileURLWithPath: mp)) }
@@ -354,7 +383,8 @@ struct MenuPanel: View {
     }
 
     private func partRow(_ p: PartInfo) -> some View {
-        HStack(alignment: .center, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
             if p.isExFAT && !p.active {
                 // exFAT: macOS 原生可读写, 接管零收益 — 无开关, 只给养护按钮
                 partLabel(p)
@@ -399,6 +429,14 @@ struct MenuPanel: View {
                 .buttonStyle(.borderless)
                 .disabled(client.busy)
                 .help("立即养护 (原生 TRIM, 期间卷会短暂卸载)")
+            }
+        }
+            // 养护结果挂在分区行下方, 自动消失
+            if let r = client.trimResults[p.id] {
+                Text(r)
+                    .font(.caption)
+                    .foregroundStyle(r.hasPrefix("failed") ? Color.red : Color.secondary)
+                    .lineLimit(2)
             }
         }
         .padding(.leading, 4)
