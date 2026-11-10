@@ -76,9 +76,11 @@ echo "预校验通过: 图案物理在盘 ($((SECONDS - T0))s)"
 VOFF=$OFF
 if [ "$((LEN * BS))" -ge 2097152 ]; then
     echo "== 3.5/5 对照组: QMP 单条 1MB discard (绕过 guest 文件系统) =="
-    ( echo '{"execute":"qmp_capabilities"}'; sleep 0.3
+    # 注意: 不能吞输出 — QMP 应答里 {"error":...} 才是真凶线索 (踩过: >/dev/null 误判)
+    CTRL_OUT=$( ( echo '{"execute":"qmp_capabilities"}'; sleep 0.3
       echo "{\"execute\":\"qemu-io\",\"arguments\":{\"device\":\"usbdisk0\",\"command\":\"discard $OFF 1048576\"}}"
-      sleep 1 ) | nc -U /tmp/anyfsd.qmp >/dev/null
+      sleep 1 ) | nc -U /tmp/anyfsd.qmp )
+    echo "QMP 应答: $(echo "$CTRL_OUT" | tail -1)"
     sleep 2
     ./unmap-live "/dev/r$PART" --verify "$OFF"
     VOFF=$((OFF + 1048576))   # 第 5 步改看后 1MB (guest 删除路径的窗口)
@@ -119,3 +121,5 @@ for i in $(seq 0 $N); do
     [ "$i" = "$N" ] && echo "VERDICT: TRIM-SWALLOWED? ($((N * STEP))s 仍未归零)"
 done
 echo "---- 总耗时 $((SECONDS - T0))s ----"
+# 收尾: 回看对照组窗口 (第 3.5 步那个 1MB) 的最终状态
+[ "$VOFF" != "$OFF" ] && { echo "对照组窗口最终读回:"; ./unmap-live "/dev/r$PART" --verify "$OFF"; }
