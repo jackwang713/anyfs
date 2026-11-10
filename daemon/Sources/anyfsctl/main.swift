@@ -14,6 +14,7 @@ import Foundation
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
     func consoleTail(withReply reply: @escaping (NSString) -> Void)
     func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void)
+    func shareName(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -83,10 +84,14 @@ case "inject":
         print(ok.boolValue ? "inject: 已注入" : "inject: 失败 (无就绪 VM)")
         sem.signal()
     }
+case "share":
+    // 分区的 guest 共享名 (含真实大小写, 脚本定位 guest 挂载点用)
+    guard CommandLine.arguments.count > 2 else { print("用法: anyfsctl share <分区>"); exit(2) }
+    proxy.shareName(CommandLine.arguments[2] as NSString) { s in print(s); sem.signal() }
 case "quit":
     proxy.appQuit { _ in print("quit: 已通知 daemon 收尸自毁"); sem.signal() }
 default:
-    print("用法: anyfsctl status|list|takeover <分区...>|release|trim|console|inject <命令>|quit")
+    print("用法: anyfsctl status|list|takeover <分区...>|release|trim|console|inject <命令>|share <分区>|quit")
     exit(2)
 }
 sem.wait()

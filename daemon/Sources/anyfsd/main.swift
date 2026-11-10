@@ -653,7 +653,7 @@ final class DiskManager {
     // guest SMB 共享名的唯一来源 (App 显示/daemon 注入/guest 挂载点三方必须一致):
     // ASCII 卷标用卷标 (空格转下划线, 与 guest init.sh 的 tr 一致),
     // 非 ASCII 或空卷标回退 bsd — mount_smbfs 的 URL 解析器不接受非 ASCII
-    private func shareNameOf(_ part: String) -> String {
+    func shareNameOf(_ part: String) -> String {
         let diskutilLabel = volumeNameOf(part)
         lock.lock(); let probed = wholeDiskLabels[part] ?? ""; lock.unlock()
         let label = diskutilLabel.isEmpty ? probed : diskutilLabel
@@ -1104,6 +1104,7 @@ final class DiskManager {
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
     func consoleTail(withReply reply: @escaping (NSString) -> Void)
     func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void)
+    func shareName(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -1164,6 +1165,10 @@ final class XPCService: NSObject, AnyFSDaemonProtocol, NSXPCListenerDelegate {
     // 串口注入 (诊断/脚本用; 与启动注入同路径, 免 sudo)
     func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void) {
         reply(NSNumber(value: DiskManager.shared.inject(cmd as String)))
+    }
+    // 分区的 guest 共享名/挂载点名 (脚本用: 卷标大小写敏感, 不能靠猜)
+    func shareName(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
+        reply(DiskManager.shared.shareNameOf(bsd as String) as NSString)
     }
     // App 退出联动: 干净收尸完成后才回话 (App 端显示"正在关闭…"等待), 然后 daemon 自毁
     func appQuit(withReply reply: @escaping (NSNumber) -> Void) {

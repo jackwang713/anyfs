@@ -7,16 +7,19 @@
 #       会命中宿主缓冲区里的旧图案 → 假阴性 (2026-11-10 实测踩坑)
 # 流程: ① SMB 埋 32MB 图案 ② 宿主定位偏移 ③ guest sync 后宿主预校验图案在介质上
 #       ④ guest 删除+fstrim ⑤ 宿主 F_NOCACHE 读回判决: 全零=EXECUTED 图案在=SWALLOWED
-# 用法: sudo ./guest-deep-trim.sh <分区> <共享名> [--fast]
+# 用法: sudo ./guest-deep-trim.sh <分区> [--fast]
 #   --fast: 只删不全量 fstrim — 依赖挂载的 -o discard (删除即发小量 UNMAP,
 #           秒级归零, 适合快速物理验证); 默认 full 为全量 fstrim (真实养护负载)
-# 前提: anyFS 已接管该分区, App 侧 SMB 卷已挂载; Terminal.app (FDA) 里跑
+#   共享名自动经 anyfsctl share 解析 (卷标大小写敏感, 踩过: exFAT/exfat 不匹配
+#   导致注入命令写不存在路径, 表象像串口死)
+# 前提: anyFS 已接管该分区, SMB 卷已挂载于 /Volumes/<共享名>; Terminal.app (FDA) 里跑
 set -e
 cd "$(dirname "$0")"
-PART="${1:?用法: sudo $0 <分区如disk7s2> <共享名> [--fast]}"
-SHARE="${2:?缺少共享名}"
+PART="${1:?用法: sudo $0 <分区如disk2s3> [--fast]}"
 FAST=0
-[ "${3:-}" = "--fast" ] && FAST=1
+[ "${2:-}" = "--fast" ] && FAST=1
+SHARE=$(anyfsctl share "$PART")
+[ -n "$SHARE" ] || { echo "FAIL: 无法从 daemon 解析 $PART 的共享名"; exit 1; }
 VOL="/Volumes/$SHARE"
 [ -d "$VOL" ] || { echo "FAIL: $VOL 不存在 (App 侧 SMB 挂载了吗?)"; exit 1; }
 PIPE=/tmp/anyfsd-serial

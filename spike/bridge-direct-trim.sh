@@ -3,13 +3,15 @@
 # 场景: trim-live-test.sh 要求 macOS 原生可写的 exFAT 卷, 对 NTFS/ext4 盘不可用.
 # 本脚本借 anyFS 完成埋图案+定位, 再释放 VM 让 QEMU 完全离场,
 # 最后对宿主分区裸设备直发 DKIOCUNMAP → F_NOCACHE 读回 — 隔离变量: 无 QEMU 补丁层
-# 用法: sudo ./bridge-direct-trim.sh <分区> <共享名>   例: sudo ./bridge-direct-trim.sh disk2s3 disk2s3
-# 前提: anyFS 已接管该分区, App 侧 SMB 卷已挂载; Terminal.app (FDA) 里跑
+# 用法: sudo ./bridge-direct-trim.sh <分区>   例: sudo ./bridge-direct-trim.sh disk2s3
+#   共享名自动经 anyfsctl share 解析 (大小写敏感, 不能靠猜)
+# 前提: anyFS 已接管该分区, SMB 卷已挂载于 /Volumes/<共享名>; Terminal.app (FDA) 里跑
 # 副作用: 图案文件残留在卷上 (内容含 1MB 零洞), 下次接管后删除即可
 set -e
 cd "$(dirname "$0")"
-PART="${1:?用法: sudo $0 <分区如disk2s3> <共享名>}"
-SHARE="${2:?缺少共享名}"
+PART="${1:?用法: sudo $0 <分区如disk2s3>}"
+SHARE=$(anyfsctl share "$PART")
+[ -n "$SHARE" ] || { echo "FAIL: 无法从 daemon 解析 $PART 的共享名"; exit 1; }
 VOL="/Volumes/$SHARE"
 [ -d "$VOL" ] || { echo "FAIL: $VOL 不存在 (App 侧 SMB 挂载了吗?)"; exit 1; }
 PIPE=/tmp/anyfsd-serial
