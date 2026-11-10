@@ -219,12 +219,20 @@ final class QEMUManager {
 
             let p = Process()
             p.executableURL = URL(fileURLWithPath: Config.qemu)
+            // 架构分支 (编译期确定, 同一份源码双平台): Intel=q35/ttyS0, Apple Silicon=virt/ttyAMA0
+            #if arch(arm64)
+            let machine = "virt,accel=hvf"
+            let consoleArg = "console=ttyAMA0"
+            #else
+            let machine = "q35,accel=hvf"
+            let consoleArg = "console=ttyS0"
+            #endif
             var args = [
-                "-machine", "virt,accel=hvf",
+                "-machine", machine,
                 "-cpu", "host", "-smp", "\(Config.guestSMP)", "-m", "\(Config.guestMemMB)",
                 "-kernel", Config.kernel,
                 "-initrd", Config.initrd,
-                "-append", "console=ttyAMA0",
+                "-append", consoleArg,
                 "-drive", "file=\(Config.iso),format=raw,if=virtio,readonly=on",
                 "-drive", "file=\(Config.bundle),format=raw,if=virtio,readonly=on",
                 "-object", "iothread,id=io0",
