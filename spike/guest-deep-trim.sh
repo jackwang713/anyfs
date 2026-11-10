@@ -70,6 +70,20 @@ PAT=$(echo "$PRE" | sed -n 's/.*pattern=\([0-9]*\).*/\1/p')
 [ "${PAT:-0}" -gt 1038090 ] || { echo "FAIL: 预校验非全图案 (介质上没有?), 中止"; exit 1; }
 echo "预校验通过: 图案物理在盘 ($((SECONDS - T0))s)"
 
+# 对照组: 同 VM 内经 QMP 让 QEMU 直发单条 1MB discard (qemu-io, 铠侠矩阵"即时"同款路径)
+# 回答"路径慢还是量大才慢": 单条若即时归零 → 桥按批量销账, 与路径无关
+# (extent 需 ≥2MB: 前 1MB 给对照组, 后 1MB 留给第 5 步看 guest 删除路径)
+VOFF=$OFF
+if [ "$((LEN * BS))" -ge 2097152 ]; then
+    echo "== 3.5/5 对照组: QMP 单条 1MB discard (绕过 guest 文件系统) =="
+    ( echo '{"execute":"qmp_capabilities"}'; sleep 0.3
+      echo "{\"execute\":\"qemu-io\",\"arguments\":{\"device\":\"usbdisk0\",\"command\":\"discard $OFF 1048576\"}}"
+      sleep 1 ) | nc -U /tmp/anyfsd.qmp >/dev/null
+    sleep 2
+    ./unmap-live "/dev/r$PART" --verify "$OFF"
+    VOFF=$((OFF + 1048576))   # 第 5 步改看后 1MB (guest 删除路径的窗口)
+fi
+
 if [ "$FAST" = 1 ]; then
     echo "== 4/5 guest 删除 (在线 discard, 不全量 fstrim) =="
     printf 'rm -f /mnt/%s/.deep-trim-pattern; sync; echo DEEP:DELETE-DONE-%s\n' "$SHARE" "$MARK" > "$PIPE.in"
@@ -97,7 +111,7 @@ echo "== 5/5 宿主 F_NOCACHE 读回判决 + QMP 打点 =="
 if [ "$FAST" = 1 ]; then STEP=2; N=90; else STEP=10; N=60; fi
 for i in $(seq 0 $N); do
     [ "$i" -gt 0 ] && sleep $STEP
-    OUT=$(./unmap-live "/dev/r$PART" --verify "$OFF")
+    OUT=$(./unmap-live "/dev/r$PART" --verify "$VOFF")
     Z=$(echo "$OUT" | sed -n 's/.*zero=\([0-9]*\).*/\1/p')
     OPS=$(qmp_ops); OPS=${OPS:-$OPS0}
     echo "T+$((i * STEP))s: zero=$Z/1048576 unmap_ops=+$((OPS - OPS0))"
