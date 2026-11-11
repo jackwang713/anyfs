@@ -874,3 +874,31 @@ DRAT/Indeterminate 设备上, "TRIM 执行了但读回旧数据"与"桥吞 TRIM"
 DZAT 返零型, 实测盘 (铠侠/致态/RTL9210B/JMS583 fw55.01) 无一例外。
 若未来遇到疑似冤案, 预案是三态判决: ❶ 归零=✅; ❷ 未归零+能力探针 UNMAP=no
 或 ioctl 拒绝=❌; ❸ 未归零+探针支持+受理=⚠️"已受理但读语义不返零, 物理不可判"。
+
+### 排障案例: QEMU 孤儿空转烧 2 核 (2026-11-11 夜, Intel Mac mini)
+
+**现象**: 无 SMB 流量时 QEMU 持续 ~175% CPU (累计 471 分钟), 且 ps 里有两个
+QEMU 同时挂同一个 /dev/rdisk2s3。
+
+**根因链 (三环)**:
+1. **收尸竞态 (daemon bug, 已修)**: QEMUManager.start() 在 `p.run()` 后先
+   sleep 3s 验活再登记 `process` 属性; appQuit/release 若落在这 3s 窗口内,
+   releaseInternal 看到 `process == nil` 直接跳过 shutdown → daemon 自毁,
+   QEMU 被孤儿化。实测触发场景: pkg 安装后 App 退出, 距 QEMU 启动恰好 2s。
+   修复: run() 后立刻登记 process/state, 验活失败再摘除。
+2. **孤儿不可达**: daemon 收尸时 unlink 串口 fifo, 后继 daemon 在同路径建新
+   inode — 孤儿持有的 fd 指向已删除 inode, 串口注入永远到不了; QMP unix
+   socket 同路径被新 VM 重新 bind 夺走; guest 没跑过 init.sh (udhcpc 未执行),
+   无网络。三个通道全断, 只能宿主侧 sample/lsof 观察后 kill。
+3. **CPU 燃烧点 (sample 实锤)**: 不是 guest 在跑 (两个 vCPU 线程 99% 在
+   __psynch_cvwait), 是 QEMU 的 vmnet 后端事件线程 — guest 网卡从未
+   `ip link set up`, vmnet 接口事件回调不停触发, 每次 getsockopt +
+   qemu_bh_schedule 写 eventfd, 636/736 采样全在这个热循环里。
+   即: 任何"guest 没走到配网那步"的 VM 都会一直吃这个 vmnet 事件风暴税。
+
+**附带观察**: 孤儿 QEMU 对 SIGTERM 无响应, 需 -9 (主线程 CFRunLoop
+mach_msg 等待, vmnet 热循环可能拖死了关机路径)。
+
+**免疫措施**: 收尸竞态修复后孤儿不再产生; 若 daemon 被 kill -9 等极端情况
+仍可能孤儿, 手工排查法 = ps 找多 QEMU → lsof 看 fd 是否指向已删除 inode
+→ sample 确认 vmnet 线程热循环 → kill -9。

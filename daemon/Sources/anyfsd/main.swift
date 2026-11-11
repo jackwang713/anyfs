@@ -277,13 +277,18 @@ final class QEMUManager {
                 self.state = "exited(\(proc.terminationStatus))"
             }
             try p.run()
+            // 进程登记必须先于验活 sleep: 窗口内到达的 appQuit/release 收尸依赖
+            // process 非空才能 terminate (2026-11-11 实踩: 登记在 sleep 后,
+            // appQuit 落在 3s 窗口内 → 收尸跳过 → QEMU 孤儿空转烧 2 核)
+            process = p
+            state = "running"
             log("QEMU 已启动 pid=\(p.processIdentifier) (第\(attempt)次) 分区=\(partitions.joined(separator: ","))")
             Thread.sleep(forTimeInterval: 3)
             if p.isRunning {
-                process = p
-                state = "running"
                 return
             }
+            process = nil
+            state = "stopped"
             if stderrBuf.contains("Resource busy") {
                 log("第 \(attempt) 次被抢挂, 重试...")
                 stderrBuf = ""
