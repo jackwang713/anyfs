@@ -101,10 +101,10 @@ macOS 原生只能**只读**挂载 NTFS，且不支持 ext4/btrfs 等 Linux 文�
 |---|---|---|---|
 | JMS583 (fw0212) | USB3 | ✅ 通过 | **平反**：经 SG_IO 全形态 UNMAP 实测通过（单/多描述符/256MB/63 描述符批量），"吞 TRIM"是旧固件冤案；SMART 不可读（macOS/Linux 均失败） |
 | RTL9210B | USB3 | ✅ 通过 | 2026-11-02 实测：DKIOCUNMAP → 图案读回全零（TRIM-EXECUTED）；**SMART 经 sntrealtek 完整可读（Linux 侧）**。注：App 架构内（macOS 宿主）SMART 不可得——已穷举证伪：smartctl 无透传、QEMU scsi-generic 依赖 Linux SG_IO、SCSITaskLib 插件已注销（kIOReturnUnsupported）、苹果私有 SAT 路径仅插盘探测期瞬态可见（磁盘工具稳定"不支持"）；健康监控功能定为写入探针间接评估。2026-11-10 新方法论复测（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：TRIM-EXECUTED，**大批量 UNMAP 异步销账 ~30s/180GB ≈ 6GB/s** |
-| JMS583（第三方硬盘盒 + 致态 Ti600 QLC） | USB3 | ✅ 通过 | 2026-11-10 新方法论（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：完整生产链路 TRIM-EXECUTED，异步销账 ~40s/171GB。与铠侠成品 PSSD（同芯片不同固件 55.01，~86s/167GB）时延差一倍多——归零时延是固件画像非芯片属性 |
+| JMS583（第三方硬盘盒 + 致态 Ti600 QLC） | USB3 | ✅ 通过 | 2026-11-10 新方法论（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：完整生产链路 TRIM-EXECUTED，归零 ~40s/171GB——**2026-11-11 归因修正：延迟在 guest 侧攒批，桥即时执行**；与铠侠成品 PSSD 的时延差实为测量方法差异，详见文末续案 |
 | ASM2364 | USB3 | ✅ | workaround 后有效 |
 | ASM2464PD | USB4/雷电 | ✅ 原生 | PCIe 直通，无桥接层问题 |
-| 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 多层物理证据（详见文末排障案例）：宿主整盘/分区设备 DKIOCUNMAP、QMP qemu-io discard、**完整生产链路 guest 全量 fstrim** 均读回全零。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。特性：**大批量 UNMAP 异步销账（~86s/167GB ≈ 2GB/s），1MB 小请求即时**，读回验证必须轮询等待。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
+| 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 多层物理证据（详见文末排障案例）：宿主整盘/分区设备 DKIOCUNMAP、QMP qemu-io discard、**完整生产链路 guest 全量 fstrim** 均读回全零。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。曾测 86s/167GB——**2026-11-11 归因存疑**：该延迟疑为 guest 侧攒批而非桥异步销账（同日 Ti600 实验证明桥即时执行），待按 QMP 打点法复测，详见文末续案。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
 
 > 注意：桥固件差异大，同一芯片不同固件行为可能不同 → App 内置每设备自检（见"六、TRIM"章），以实测绿灯为准，不再依赖芯片白名单。
 
@@ -759,3 +759,38 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 
 - **通道状态灯用 QMP 计数器**（`unmap_ops/failed_unmap_operations`）：便宜、即时，覆盖 guest→QEMU→macOS 三层，适合做展开详情的常驻三态灯（✅ 有流量 / ❌ 被拒 / ● 未观察）
 - **NAND 级深度检测降级为可选诊断**（spike 工具或专家按钮）：~90s+ 轮询 + 写删 32MB，不适合做每设备强制自检；养护本身 fire-and-forget 即可（与 Windows 同哲学）
+
+### 排障续案：TRIM 延迟归因翻转 + 金标准基建修正（2026-11-11，Ti600@JMS583/RTL9210B 双盒实测）
+
+**核心翻转：桥是无辜的，延迟在 guest→QEMU 段。**
+之前归到桥固件的"大批量 UNMAP 异步销账 30~86s"被 QMP 打点推翻：guest 删除后 20~36s 内 QEMU 收不到任何 UNMAP（`unmap_ops=+0`），ops 跳变的**同一瞬间** NAND 归零。桥一旦收到立即执行，零积压。
+
+**数据矩阵（Ti600 1TB 致态 QLC，JMS583 盒）**：
+
+| 路径 | 量 | 结果 |
+|---|---|---|
+| 宿主直发 DKIOCUNMAP（bridge-direct-trim，VM 离场） | 1MB | **即时归零 ×4 复现**（NTFS/exFAT 时代均然，fs 无关） |
+| guest exFAT 删除（-o discard 在线） | 32MB | +256 ops @T+22s 同刻归零（256×128KB=恰为图案体量，guest 拆成 128KB 条） |
+| guest NTFS 删除（-o discard 在线） | 32MB | +1 op @T+24~36s 同刻归零（ntfs3 合并成单条大范围） |
+| guest 全量 fstrim | 171~180GB | 30~40s（旧数据，打点粒度粗，疑同因——fstrim 逐段同步发） |
+| 铠侠 PSSD 86s/167GB | — | **旧"异步销账"结论作废，归因需按新法复测** |
+
+**归因收敛**：延迟与文件系统无关（exFAT/NTFS 一致）、与 UNMAP 数量无关（256 条瞬间归零）、与桥无关（直发秒回）。剩两个嫌疑：guest 内核攒批 或 QEMU→宿主 ioctl 段在"VM 持有设备"状态下被压。最后一刀：DEL-BEGIN/DELETE-DONE 双标记打点测 rm 是否同步阻塞等 discard 完成（已加进脚本，待跑）。
+
+**金标准基建踩坑（一日四坑，全部根治）**：
+
+1. **共享名大小写**：卷标真实大小写 `exFAT`；SMB 共享名大小写不敏感（能挂上），但注入 guest 的路径大小写敏感 → 写不存在路径静默失败，表象酷似"串口死"。根治：`anyfsctl share` 查询 + 脚本自动解析，不再手工传共享名
+2. **smbfs 目录缓存假阴性**：guest 带外新建文件，宿主 `ls`/`[ -f ]` 看不到但 `cat` 能读到（铁证实测）。卷内结果文件信号旗机制整体废弃 → **控制台回显 + `anyfsctl console` 轮询**（标记带 PID 后缀防多轮误读）
+3. **filefrag 输出格式**：Alpine e2fsprogs-extra 的 filefrag 裸 `-v` 只出摘要不出 extent 表，必须 `-e -v`；文件碎段时首段可能 <1MB，需扫描选首个够长的 extent
+4. **QMP qemu-io 已移除**：QEMU 11 无此命令（CommandNotFound），对照组曾因 `>/dev/null` 吞输出而假死——**诊断输出永远不许吞**
+5. **busybox blkdiscard 挂载中 EBUSY**（-f 无效）：guest 内块层对照组暂缺可用手段
+
+**新增工具（spike/ 已落盘）**：
+
+- `anyfsctl console`：guest 串口 transcript 末尾 60 行（原来只在 daemon 内存，排查全靠猜）
+- `anyfsctl inject <命令>`：串口注入走 XPC（与启动注入同路径，**免 sudo**；原来脚本要 sudo 很大程度是因为 root 持有的 fifo）
+- `anyfsctl share <分区>`：查共享名真实大小写
+- `bridge-direct-trim.sh`：宿主直发金标准（方案A 文件系统无关版，借 anyFS 埋图案+定位，释放 VM 后直发 DKIOCUNMAP）
+- `guest-deep-trim.sh` v3：`--fast`（只删不全量 fstrim，验证在线 discard）+ QMP unmap_ops 打点 + 控制台信号旗 + 删除前后双标记计时
+
+**对产品结论的修正**：通道灯用 QMP 计数器、养护 fire-and-forget 的设计**维持不变且更稳固**——桥侧即时执行意味着"养护发出即生效"（guest 侧的 ~30s 攒批反而减少命令数，有益无害）。延迟归因清楚后，"每设备首次接入的物理认证"若做，可走宿主直发单条 1MB（即时出结果），不必走 guest 批量路径。
