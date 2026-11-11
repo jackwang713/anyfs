@@ -22,31 +22,58 @@ echo "BRIDGE-INIT $(date)"
 
 mkdir -p /mnt
 
-# 真实卷标映射 (daemon 经串口注入 /tmp/anyfs-names, 格式 sda=卷标):
-# busybox blkid 读非 ASCII 卷标 (如中文 FAT32 卷标的 OEM 字符集) 会乱码,
-# 乱码共享名导致 SMB 枚举崩溃/挂载失败, 故卷标以宿主侧 diskutil 为准
-get_name() {
-    dev=$(basename "$1")
+# 真实卷标映射 (daemon 经串口注入 /tmp/anyfs-names, 格式 tgt<N>=卷标):
+# busybox blkid 读非 ASCII 卷标 (中文 FAT32 卷标的 OEM 字符集) 会乱码,
+# 乱码共享名导致 SMB 枚举崩溃/挂载失败, 故卷标以宿主侧 diskutil 为准。
+# 注意: 不能按 sda/sdb 字母对位 — SCSI 异步探测, 字母分配是竞争结果
+# (2026-11-11 实踩: sda 落到 target1 上, 卷标张冠李戴);
+# 唯一稳定对位 = sysfs 路径里的 target0:0:N (= daemon 侧的 scsi-id)
+get_name() {  # $1=回退名(blkid LABEL) $2=target号
     if [ -f /tmp/anyfs-names ]; then
-        n=$(sed -n "s|^$dev=||p" /tmp/anyfs-names | head -1)
+        n=$(sed -n "s|^tgt$2=||p" /tmp/anyfs-names | head -1)
         [ -n "$n" ] && { echo "$n"; return; }
     fi
-    echo "${2:-$dev}"
+    echo "$1"
 }
+
+# 设备枚举按 target 升序 (= daemon 的直通顺序), 不按字母
+# (字母是异步竞争结果; 重复卷标去重后缀也要确定性)
+tgt_of() {  # $1=块设备路径 → 打印 target 号 (无则空)
+    readlink "/sys/block/$(basename "$1")" 2>/dev/null \
+        | sed -n 's|.*target0:0:\([0-9]*\)/.*|\1|p'
+}
+DEVICES=""
+for t in $(seq 0 15); do
+    for b in /sys/block/sd?; do
+        [ -e "$b" ] || continue
+        [ "$(tgt_of "$b")" = "$t" ] && DEVICES="$DEVICES /dev/$(basename "$b")"
+    done
+done
+# target 对不上的 (理论上不会有) 追加末尾兜底
+for b in /sys/block/sd?; do
+    [ -e "$b" ] || continue
+    case " $DEVICES " in *"/dev/$(basename "$b")"*) ;; *) DEVICES="$DEVICES /dev/$(basename "$b")";; esac
+done
 
 # --- 探测并挂载所有受支持分区 ---
 # 整盘直通: 文件系统在 sda1..n; 分区直通: 每个直通分区是一块独立盘 (/dev/sda, /dev/sdb ...)
 # (整盘的 blkid 只有 PTTYPE 没有 TYPE, 会被下面的类型过滤自动跳过, 故两种形态可共用一份列表)
-for part in /dev/sd[a-z][0-9]* /dev/sd[a-z]; do
+USED_NAMES=" "
+for part in $DEVICES; do
     [ -b "$part" ] || continue
     info=$(blkid "$part" 2>/dev/null) || continue
     eval "$(echo "$info" | sed 's/^[^ ]* //;s/\bUUID="[^"]*"//g')" 2>/dev/null
     [ -z "${TYPE:-}" ] && continue
     case "$TYPE" in ntfs|exfat|vfat|ext4|ext3|ext2) ;; *) continue;; esac
-    # 卷标优先用 daemon 注入的真实值, 回退 blkid (ASCII 卷标时两者一致)
-    name=$(get_name "$part" "$LABEL")
-    # 名字消毒: 空格转下划线
+    # 卷标优先用 daemon 注入的真实值 (按 target 对位), 回退 blkid
+    name=$(get_name "$LABEL" "$(tgt_of "$part")")
+    # 名字消毒: 空格转下划线; 重名去重 (同卷标多盘按 target 序加 -2/-3)
     name=$(echo "$name" | tr ' ' '_')
+    base=$name; k=2
+    while case "$USED_NAMES" in *" $name "*) true;; *) false;; esac; do
+        name="$base-$k"; k=$((k+1))
+    done
+    USED_NAMES="$USED_NAMES$name "
     mp="/mnt/$name"
     mkdir -p "$mp"
     case "$TYPE" in

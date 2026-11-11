@@ -12,6 +12,11 @@ import Foundation
     func trimNow(withReply reply: @escaping (NSString) -> Void)
     func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrim(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeBegin(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeLocate(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeExecute(_ bsd: NSString, offset: NSNumber, withReply reply: @escaping (NSString) -> Void)
+    func trimStats(withReply reply: @escaping (NSString) -> Void)
     func consoleTail(withReply reply: @escaping (NSString) -> Void)
     func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void)
     func shareName(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
@@ -88,10 +93,60 @@ case "share":
     // 分区的 guest 共享名 (含真实大小写, 脚本定位 guest 挂载点用)
     guard CommandLine.arguments.count > 2 else { print("用法: anyfsctl share <分区>"); exit(2) }
     proxy.shareName(CommandLine.arguments[2] as NSString) { s in print(s); sem.signal() }
+case "deeptrim":
+    // TRIM 深度检测 (guest 路径; 分区须已接管; ~13s 物理判决)
+    guard CommandLine.arguments.count > 2 else { print("用法: anyfsctl deeptrim <分区>"); exit(2) }
+    print("深度检测 \(CommandLine.arguments[2]) (guest 链路, ~13s)...")
+    proxy.deepTrim(CommandLine.arguments[2] as NSString) { s in print("deeptrim: \(s)"); sem.signal() }
+case "deeptrimnative":
+    // exFAT 原生深度检测 (免接管; 图案由本 CLI 经原生挂载写删, ~5s)
+    guard CommandLine.arguments.count > 2 else { print("用法: anyfsctl deeptrimnative <分区>"); exit(2) }
+    let bsd = CommandLine.arguments[2]
+    // 找原生挂载点 (必须已由 macOS 挂载)
+    let mt = Process(); mt.executableURL = URL(fileURLWithPath: "/sbin/mount")
+    let mp = Pipe(); mt.standardOutput = mp
+    try? mt.run(); mt.waitUntilExit()
+    let mout = String(data: mp.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard let mline = mout.split(separator: "\n").first(where: { $0.hasPrefix("/dev/\(bsd) on ") }),
+          let r = mline.range(of: " on "), let r2 = mline.range(of: " (", range: r.upperBound..<mline.endIndex) else {
+        print("deeptrimnative: \(bsd) 未被 macOS 原生挂载"); exit(1)
+    }
+    let mnt = String(mline[r.upperBound..<r2.lowerBound])
+    let probe = "\(mnt)/.anyfs-trim-probe"
+    print("深度检测 \(bsd) (原生链路)...")
+    proxy.deepTrimNativeBegin(bsd as NSString) { s in
+        guard (s as String) == "ok" else { print("begin: \(s)"); sem.signal(); return }
+        // 经原生挂载埋 32MB 0x5A 图案 + 落盘
+        let data = Data(repeating: 0x5A, count: 32 * 1024 * 1024)
+        do {
+            try data.write(to: URL(fileURLWithPath: probe))
+        } catch {
+            print("写图案失败: \(error.localizedDescription) (可移动卷权限?)"); sem.signal(); return
+        }
+        Darwin.sync()
+        proxy.deepTrimNativeLocate(bsd as NSString) { s2 in
+            let loc = s2 as String
+            guard loc.hasPrefix("OFF="), let off = UInt64(loc.dropFirst(4)) else {
+                print("locate: \(loc)")
+                try? FileManager.default.removeItem(atPath: probe)
+                sem.signal(); return
+            }
+            print("定位: 偏移 \(off) — 删除图案并执行定向 UNMAP...")
+            try? FileManager.default.removeItem(atPath: probe)
+            Darwin.sync()
+            proxy.deepTrimNativeExecute(bsd as NSString, offset: NSNumber(value: off)) { s3 in
+                print("deeptrimnative: \(s3)")
+                sem.signal()
+            }
+        }
+    }
+case "trimstats":
+    // TRIM 通道灯: QMP unmap_ops 汇总 (受理≠执行, 物理判决看 deeptrim)
+    proxy.trimStats { s in print("trimstats: \(s)"); sem.signal() }
 case "quit":
     proxy.appQuit { _ in print("quit: 已通知 daemon 收尸自毁"); sem.signal() }
 default:
-    print("用法: anyfsctl status|list|takeover <分区...>|release|trim|console|inject <命令>|share <分区>|quit")
+    print("用法: anyfsctl status|list|takeover <分区...>|release|trim|deeptrim <分区>|deeptrimnative <分区>|trimstats|console|inject <命令>|share <分区>|quit")
     exit(2)
 }
 sem.wait()

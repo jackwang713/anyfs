@@ -1,7 +1,8 @@
 #!/bin/bash
-# check-trim.sh — 查看各直通盘的 TRIM(UNMAP) 计数, 验证养护是否真到硬件
+# check-trim.sh — 查看各直通盘的 TRIM(UNMAP) 计数, 辅助判断养护流量是否到桥
 # 用法: sudo ./check-trim.sh
-# 判读: unmap_ops>0 且 failed=0 → TRIM 真被执行; =0 → 设备不支持/未触发; failed>0 → 被拒绝
+# 判读: failed>0 → 设备拒绝; ops>0 → 有流量但受理≠执行 (吞 TRIM 的桥也计 ops,
+#       物理判决唯 guest-deep-trim/native-deep-trim 读回可定); ops=0 → 未触发
 set -e
 QMP=/tmp/anyfsd.qmp
 [ -S "$QMP" ] || { echo "FAIL: $QMP 不存在 (daemon/VM 未运行?)"; exit 1; }
@@ -23,7 +24,9 @@ for d in rows:
     if failed > 0:
         verdict = "TRIM 被拒绝 — 该设备不支持"
     elif ops > 0:
-        verdict = "TRIM 已执行 — 养护有效"
+        # 教训 (2026-11-11 三星 U盘): ops>0 failed=0 只证明命令流到了 QEMU,
+        # 吞 TRIM 的桥 (PROBE UNMAP=no) 也满足 — 物理生效与否唯深度检测读回可判
+        verdict = "有 TRIM 流量 (受理≠执行, 物理判决跑 guest-deep-trim/native-deep-trim)"
     else:
         verdict = "未触发/不支持 (fstrim 空跑)"
     print(f"{name}: unmap_ops={ops} unmap={mb}MB failed={failed}  → {verdict}")

@@ -302,14 +302,15 @@ final class QEMUManager {
         serial.send("ip link set eth0 up && udhcpc -i eth0 -q\n")
         Thread.sleep(forTimeInterval: 2)
         serial.send("mount -t ext2 -o ro /dev/vdb /opt\n")
-        // 注入真实卷标映射: guest busybox blkid 读非 ASCII 卷标 (中文 FAT32 等) 会乱码
+        // 注入真实卷标映射: guest busybox blkid 读非 ASCII 卷标 (中文 FAT32 等) 会乱码。
+        // 键用 tgt<N> (= scsi-id), 不用 sda/sdb 字母 — SCSI 异步探测字母是竞争结果,
+        // init.sh 按 sysfs target 对位 (2026-11-11 实踩字母交换致卷标张冠李戴)
         for (i, part) in partitions.enumerated() {
-            guard let label = partLabels[part], !label.isEmpty,
-                  let ch = UnicodeScalar(97 + i) else { continue }   // sda, sdb, ...
+            guard let label = partLabels[part], !label.isEmpty else { continue }
             let safe = label.replacingOccurrences(of: "'", with: "")
                             .replacingOccurrences(of: "\\", with: "")
                             .replacingOccurrences(of: "\n", with: "")
-            serial.send("echo 'sd\(ch)=\(safe)' >> /tmp/anyfs-names\n")
+            serial.send("echo 'tgt\(i)=\(safe)' >> /tmp/anyfs-names\n")
         }
         serial.send("sh /opt/init.sh\n")
         state = "guest-init"
@@ -653,12 +654,24 @@ final class DiskManager {
     // guest SMB 共享名的唯一来源 (App 显示/daemon 注入/guest 挂载点三方必须一致):
     // ASCII 卷标用卷标 (空格转下划线, 与 guest init.sh 的 tr 一致),
     // 非 ASCII 或空卷标回退 bsd — mount_smbfs 的 URL 解析器不接受非 ASCII
-    func shareNameOf(_ part: String) -> String {
+    // 共享名基础值 (卷标/回退; 不含重名去重后缀)
+    private func baseShareName(_ part: String) -> String {
         let diskutilLabel = volumeNameOf(part)
         lock.lock(); let probed = wholeDiskLabels[part] ?? ""; lock.unlock()
         let label = diskutilLabel.isEmpty ? probed : diskutilLabel
         guard !label.isEmpty, label.allSatisfy(\.isASCII) else { return part }
         return label.replacingOccurrences(of: " ", with: "_")
+    }
+
+    // 共享名 = init.sh 挂载点名: 基础值 + 重名去重 (-2/-3, 按直通顺序确定性生成)
+    // 必须与 init.sh 的去重逻辑一致: 遍历 partitions 数组序, 同名第 N 个加 -N
+    func shareNameOf(_ part: String) -> String {
+        let base = baseShareName(part)
+        lock.lock(); let parts = qemu?.partitions ?? []; lock.unlock()
+        guard let idx = parts.firstIndex(of: part), idx > 0 else { return base }
+        var n = 0
+        for j in 0..<idx where baseShareName(parts[j]) == base { n += 1 }
+        return n == 0 ? base : "\(base)-\(n + 1)"
     }
 
     // 枚举外接盘上的可接管分区 (NTFS/exFAT/ext* 等)
@@ -905,7 +918,7 @@ final class DiskManager {
         while Date() < deadline {
             if q.serial.containsAfter("TRIM-PART-DONE", offset: off) {
                 let out = q.serial.substringAfter(off)
-                let detail = out.split(separator: "\n")
+                let detail = out.components(separatedBy: .newlines)
                     .filter { $0.hasPrefix("TRIM-PART:") }
                     .last
                     .map { String($0.dropFirst(10)).trimmingCharacters(in: .whitespaces) } ?? ""
@@ -940,8 +953,15 @@ final class DiskManager {
     }
     private func le64(_ b: [UInt8], _ o: Int) -> UInt64 { UInt64(le32(b, o)) | UInt64(le32(b, o+4)) << 32 }
 
-    // 解析 exFAT allocation bitmap → 空闲簇的字节区间段 (分区相对偏移, 512 对齐天然满足)
-    private func exfatFreeRuns(_ fd: Int32) -> [(UInt64, UInt64)]? {
+    // exFAT 几何 + allocation bitmap 原文 (原生养护/深度检测共用)
+    private struct ExfatGeom {
+        let bitmap: [UInt8]
+        let heapOff: UInt64
+        let clustSize: UInt64
+        let clustCount: UInt32
+    }
+
+    private func exfatBitmap(_ fd: Int32) -> ExfatGeom? {
         guard let vbr = rawRead(fd, 0, 512),
               String(decoding: vbr[3...10], as: UTF8.self) == "EXFAT   " else { return nil }
         let sectSize = UInt64(1) << vbr[108]
@@ -995,19 +1015,25 @@ final class DiskManager {
         }
         guard bmpCluster >= 2, bmpLen > 0, bmpLen < 1 << 28 else { return nil }
         guard let bitmap = readClusters(bmpCluster, bmpLen) else { return nil }
+        return ExfatGeom(bitmap: bitmap, heapOff: heapOff, clustSize: clustSize, clustCount: clustCount)
+    }
+
+    // 解析 exFAT allocation bitmap → 空闲簇的字节区间段 (分区相对偏移, 512 对齐天然满足)
+    private func exfatFreeRuns(_ fd: Int32) -> [(UInt64, UInt64)]? {
+        guard let g = exfatBitmap(fd) else { return nil }
         // 位图: bit i (字节内 LSB 优先) 对应簇 i+2, 0=空闲
         var runs: [(UInt64, UInt64)] = []
         var runStart: UInt64? = nil
-        for i in 0..<Int(clustCount) {
-            let free = bitmap[i / 8] & (1 << (i % 8)) == 0
+        for i in 0..<Int(g.clustCount) {
+            let free = g.bitmap[i / 8] & (1 << (i % 8)) == 0
             if free && runStart == nil { runStart = UInt64(i) }
             if !free, let s = runStart {
-                runs.append((heapOff + s * clustSize, (UInt64(i) - s) * clustSize))
+                runs.append((g.heapOff + s * g.clustSize, (UInt64(i) - s) * g.clustSize))
                 runStart = nil
             }
         }
         if let s = runStart {
-            runs.append((heapOff + s * clustSize, (UInt64(clustCount) - s) * clustSize))
+            runs.append((g.heapOff + s * g.clustSize, (UInt64(g.clustCount) - s) * g.clustSize))
         }
         return runs
     }
@@ -1089,6 +1115,253 @@ final class DiskManager {
                   : "部分失败: \(failedSegs)/\(runs.count) 段被拒")
         }
     }
+
+    // MARK: - TRIM 深度检测 (金标准产品化, 2026-11-11 终案后落地)
+    // 判读逻辑见 ntfs-bridge-app-plan.md "排障终案": TRIM 全链路秒级,
+    // 检测只需 ~13s; 图案必须 guest 本地生成, 经 SMB 写入会触发
+    // macOS smbfs 客户端 deferred close → smbd 持 fd → evict 迟延 16~53s 假象
+
+    // 串口标记等待 (trimNow 同款模式)
+    private func waitSerial(_ q: QEMUManager, _ needle: String, _ off: Int, _ timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if q.serial.containsAfter(needle, offset: off) { return true }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        return false
+    }
+
+    // filefrag -e -v 输出 → 首个 ≥1MB 连续 extent 的分区相对字节偏移
+    // 行格式: "   0:        0..   65535:  6191072.. 6256607:  65536:  ... flags"
+    // 固定列位 toks[3]=physlo("N..") toks[5]=len("N:") (expected 列在 len 之后, 不挪位)
+    private func parseFilefrag(_ text: String) -> UInt64? {
+        var bs: UInt64 = 0
+        for line in text.components(separatedBy: .newlines) {
+            if let m = line.range(of: #"blocks of (\d+) bytes"#, options: .regularExpression) {
+                bs = UInt64(line[m].split(separator: " ")[2]) ?? 0
+                break
+            }
+        }
+        guard bs > 0 else { return nil }
+        for line in text.components(separatedBy: .newlines) {
+            let toks = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard toks.count >= 6, toks[0].hasSuffix(":"), toks[1].contains(".."),
+                  toks[3].contains("..") else { continue }
+            guard let phys = UInt64(toks[3].replacingOccurrences(of: "..", with: "")),
+                  let len = UInt64(toks[5].replacingOccurrences(of: ":", with: "")),
+                  len * bs >= 1_048_576 else { continue }
+            return phys * bs
+        }
+        return nil
+    }
+
+    // 宿主 F_NOCACHE 读 1MB 统计 0x00/0x5A 个数 (off 必须 512 对齐 — FIEMAP 输出天然满足)
+    // 教训: 不经 F_NOCACHE 会命中 macOS 缓冲区里的旧图案 → 假阴性 (2026-11-10)
+    private func hostVerify(_ fd: Int32, _ off: UInt64) -> (zero: Int, pattern: Int) {
+        var buf = [UInt8](repeating: 0, count: 1_048_576)
+        guard pread(fd, &buf, buf.count, off_t(off)) == buf.count else { return (-1, -1) }
+        var z = 0, p = 0
+        for b in buf { if b == 0 { z += 1 } else if b == 0x5A { p += 1 } }
+        return (z, p)
+    }
+
+    // guest 路径深度检测 (XPC; 接管的分区): dd 埋图案 → filefrag 定位 →
+    // 预校验 → rm 触发在线 discard → F_NOCACHE 轮询读回判决, ~13s
+    func deepTrim(_ bsd: String, reply: @escaping (String) -> Void) {
+        DispatchQueue(label: "deep-trim").async {
+            func fail(_ s: String) { log("深度检测 \(bsd) 失败: \(s)"); reply("failed: \(s)") }
+            guard let q = self.qemu, q.state == "ready" else { fail("无活动 VM 或未就绪"); return }
+            self.lock.lock(); let active = self.activeParts.contains(bsd); self.lock.unlock()
+            guard active else { fail("\(bsd) 未由 anyFS 接管"); return }
+            // 挂载点按 target(=直通序号) 在 guest 内解析, 不碰卷标 —
+            // SCSI 异步探测字母会交换, 且多块盘可能同卷标 (2026-11-11 实踩)
+            guard let idx = q.partitions.firstIndex(of: bsd) else { fail("\(bsd) 不在直通列表"); return }
+            let offM = q.serial.length
+            q.serial.send("MP=; for d in /dev/sd?; do case \"$(readlink /sys/block/${d#/dev/})\" in *target0:0:\(idx)/*) MP=$(grep \"^$d \" /proc/mounts | cut -d' ' -f2);; esac; done; echo DT-MP\"\"=$MP\n")
+            guard self.waitSerial(q, "DT-MP=", offM, 15) else { fail("挂载点解析超时"); return }
+            let mpSeg = q.serial.substringAfter(offM)
+            guard let mp = mpSeg.components(separatedBy: .newlines)
+                    .last(where: { $0.hasPrefix("DT-MP=") })
+                    .map({ String($0.dropFirst(6)) }), !mp.isEmpty else {
+                fail("guest 未找到 target\(idx) 设备的挂载点"); return
+            }
+            let pat = "\(mp)/.anyfs-deep-pattern"
+            let cleanup = { q.serial.send("rm -f \(pat)\n") }
+
+            // ① 埋图案: guest 本地 dd|tr (不经 SMB! 否则 macOS 客户端句柄缓存致假延迟)
+            let off0 = q.serial.length
+            q.serial.send("dd if=/dev/zero bs=1M count=32 2>/dev/null | tr \"\\000\" \"\\132\" > \(pat); sync; echo DT-PLAN\"\"TED\n")
+            guard self.waitSerial(q, "DT-PLANTED", off0, 20) else { fail("埋图案超时"); return }
+
+            // ② FIEMAP 定位 (文件系统无关)
+            let off1 = q.serial.length
+            q.serial.send("/opt/usr/sbin/filefrag -e -v \(pat); echo DT-LOCA\"\"TED\n")
+            guard self.waitSerial(q, "DT-LOCATED", off1, 15) else { cleanup(); fail("定位超时"); return }
+            guard let poff = self.parseFilefrag(q.serial.substringAfter(off1)) else {
+                cleanup(); fail("filefrag 解析失败 (extent 不足 1MB?)"); return
+            }
+
+            // ③ 宿主预校验: 图案确实落在介质上
+            let fd = open("/dev/r\(bsd)", O_RDONLY)
+            guard fd >= 0 else { cleanup(); fail("打开裸设备失败 (errno=\(errno))"); return }
+            fcntl(fd, F_NOCACHE, 1)
+            let (_, p0) = self.hostVerify(fd, poff)
+            guard p0 > 1_038_000 else {
+                close(fd); cleanup(); fail("预校验: 目标区非全图案 (未落盘?)"); return
+            }
+
+            // ④ guest 删除 (在线 discard 立即触发)
+            let t0 = Date()
+            let off2 = q.serial.length
+            q.serial.send("rm -f \(pat); sync; echo DT-DELE\"\"TED\n")
+            guard self.waitSerial(q, "DT-DELETED", off2, 15) else {
+                close(fd); fail("删除超时"); return
+            }
+
+            // ⑤ F_NOCACHE 轮询读回判决 (2s×8; 正常 T+0~4s 全零)
+            var ok = false
+            for i in 0..<9 {
+                if i > 0 { Thread.sleep(forTimeInterval: 2) }
+                let (z, _) = self.hostVerify(fd, poff)
+                if z == 1_048_576 { ok = true; break }
+            }
+            close(fd)
+            let dt = Int(Date().timeIntervalSince(t0))
+            if ok {
+                log("深度检测 \(bsd): 通过 (\(dt)s 归零)")
+                reply("✅ TRIM 通路正常 — 删除后 \(dt)s 物理归零")
+            } else {
+                fail("16s 未归零 — TRIM 未生效或被吞")
+            }
+        }
+    }
+
+    // MARK: exFAT 原生深度检测 (免接管, 三阶段; 图案文件由 App/CLI 经原生挂载写删)
+    // 流程对齐 spike/native-deep-trim.sh: begin(位图A) → [App 写图案+sync] →
+    // locate(位图B+diff+预校验, 返回 OFF) → [App 删图案+sync] → execute(卸载→定向UNMAP→读回)
+    private var nativeSnap: [String: ExfatGeom] = [:]
+
+    private func openRaw(_ bsd: String, _ flags: Int32) -> Int32? {
+        guard bsd.range(of: #"^disk\d+(s\d+)?$"#, options: .regularExpression) != nil else { return nil }
+        let fd = open("/dev/r\(bsd)", flags)
+        if fd >= 0 { fcntl(fd, F_NOCACHE, 1) }
+        return fd >= 0 ? fd : nil
+    }
+
+    func deepTrimNativeBegin(_ bsd: String, reply: @escaping (String) -> Void) {
+        DispatchQueue(label: "deep-native").async {
+            guard let fd = self.openRaw(bsd, O_RDONLY) else {
+                reply("failed: 分区名不合法或裸设备打不开 (errno=\(errno))"); return
+            }
+            defer { close(fd) }
+            guard let g = self.exfatBitmap(fd) else {
+                reply("failed: 不是可识别的 exFAT 分区"); return
+            }
+            self.nativeSnap[bsd] = g
+            reply("ok")
+        }
+    }
+
+    func deepTrimNativeLocate(_ bsd: String, reply: @escaping (String) -> Void) {
+        DispatchQueue(label: "deep-native").async {
+            func fail(_ s: String) { log("原生深度检测 \(bsd) 失败: \(s)"); reply("failed: \(s)") }
+            guard let a = self.nativeSnap[bsd] else { fail("未先 begin"); return }
+            guard let fd = self.openRaw(bsd, O_RDONLY) else { fail("裸设备打不开"); return }
+            defer { close(fd) }
+            guard let b = self.exfatBitmap(fd) else { fail("位图 B 读取失败"); return }
+            // 位 0→1 = 新分配簇 (即图案文件), 取最长 ≥1MB 段
+            var runs: [(UInt64, UInt64)] = []
+            var start: Int? = nil
+            for i in 0..<Int(b.clustCount) {
+                let newly = (b.bitmap[i / 8] >> (i % 8)) & 1 == 1 && (a.bitmap[i / 8] >> (i % 8)) & 1 == 0
+                if newly && start == nil { start = i }
+                if !newly, let s = start {
+                    runs.append((b.heapOff + UInt64(s) * b.clustSize, UInt64(i - s) * b.clustSize))
+                    start = nil
+                }
+            }
+            if let s = start {
+                runs.append((b.heapOff + UInt64(s) * b.clustSize, UInt64(Int(b.clustCount) - s) * b.clustSize))
+            }
+            guard let best = runs.filter({ $0.1 >= 1_048_576 }).max(by: { $0.1 < $1.1 }) else {
+                fail("位图差分无 ≥1MB 新分配段 (图案未落盘?)"); return
+            }
+            let (_, p) = self.hostVerify(fd, best.0)
+            guard p > 1_038_000 else { fail("预校验: 目标区非全图案 (diff 错位?)"); return }
+            reply("OFF=\(best.0)")
+        }
+    }
+
+    func deepTrimNativeExecute(_ bsd: String, offset: UInt64, reply: @escaping (String) -> Void) {
+        DispatchQueue(label: "deep-native").async {
+            func fail(_ s: String) { log("原生深度检测 \(bsd) 失败: \(s)"); reply("failed: \(s)") }
+            defer { self.nativeSnap.removeValue(forKey: bsd) }
+            self.lock.lock(); let busy = self.busy; self.lock.unlock()
+            guard !busy else { fail("忙 (上一次操作进行中)"); return }
+            self.busy = true
+            defer { self.busy = false }
+            // 卸载 (定向 UNMAP 需要; defer 保证挂回)
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+            t.arguments = ["unmount", "force", "/dev/\(bsd)"]
+            t.standardOutput = FileHandle.nullDevice; t.standardError = FileHandle.nullDevice
+            try? t.run(); t.waitUntilExit()
+            defer {
+                let m = Process()
+                m.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+                m.arguments = ["mount", "/dev/\(bsd)"]
+                m.standardOutput = FileHandle.nullDevice; m.standardError = FileHandle.nullDevice
+                try? m.run(); m.waitUntilExit()
+            }
+            guard let fd = self.openRaw(bsd, O_RDWR) else { fail("裸设备打不开"); return }
+            defer { close(fd) }
+            // 安全闸 (unmap-live 同款): 目标区必须 >99% 0x5A 才动手
+            let (_, p) = self.hostVerify(fd, offset)
+            guard p > 1_038_000 else { fail("安全闸: 目标区非全图案, 拒绝 UNMAP"); return }
+            var ext = DKExtent(offset: offset, length: 1_048_576)
+            let rc = withUnsafeMutablePointer(to: &ext) { ep -> Int32 in
+                var um = DKUnmap(extents: UnsafeRawPointer(ep), extentsCount: 1, flags: 0)
+                return ioctl(fd, self.DKIOCUNMAP_CMD, &um)
+            }
+            guard rc == 0 else {
+                fail("DKIOCUNMAP 被拒 (errno=\(errno) \(String(cString: strerror(errno)))) — 桥可能不支持 UNMAP"); return
+            }
+            let (z, _) = self.hostVerify(fd, offset)
+            if z == 1_048_576 {
+                log("原生深度检测 \(bsd): 通过")
+                reply("✅ TRIM 通路正常 — 原生 DKIOCUNMAP 读回全零")
+            } else {
+                fail("UNMAP 已受理但读回非零 — 桥疑似吞 TRIM")
+            }
+        }
+    }
+
+    // TRIM 通道灯 (XPC): QMP query-blockstats 汇总 usbdisk* 的 unmap 计数
+    private func qmpUnmapOps() -> (ops: UInt64, failed: UInt64)? {
+        guard qemu?.state == "ready" else { return nil }
+        do {
+            let qmp = QMPClient()
+            try qmp.connect(path: Config.qmpPath)
+            let resp = try qmp.execute("query-blockstats")
+            guard let data = resp.data(using: .utf8),
+                  let j = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let arr = j["return"] as? [[String: Any]] else { return nil }
+            var ops: UInt64 = 0, failed: UInt64 = 0
+            for e in arr {
+                guard let dev = e["device"] as? String, dev.hasPrefix("usbdisk"),
+                      let st = e["stats"] as? [String: Any] else { continue }
+                ops += (st["unmap_operations"] as? NSNumber)?.uint64Value ?? 0
+                failed += (st["failed_unmap_operations"] as? NSNumber)?.uint64Value ?? 0
+            }
+            return (ops, failed)
+        } catch { return nil }
+    }
+
+    // 通道灯文案: ✅ 有流量 / ❌ 有被拒 / ● 未观察 (无流量或无 VM)
+    func trimStats() -> String {
+        guard let r = qmpUnmapOps() else { return "inactive" }
+        return "ops=\(r.ops) failed=\(r.failed)"
+    }
 }
 
 // MARK: - XPC 服务
@@ -1102,6 +1375,11 @@ final class DiskManager {
     func trimNow(withReply reply: @escaping (NSString) -> Void)
     func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrim(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeBegin(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeLocate(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeExecute(_ bsd: NSString, offset: NSNumber, withReply reply: @escaping (NSString) -> Void)
+    func trimStats(withReply reply: @escaping (NSString) -> Void)
     func consoleTail(withReply reply: @escaping (NSString) -> Void)
     func inject(_ cmd: NSString, withReply reply: @escaping (NSNumber) -> Void)
     func shareName(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
@@ -1156,6 +1434,26 @@ final class XPCService: NSObject, AnyFSDaemonProtocol, NSXPCListenerDelegate {
     // exFAT 原生养护 (卸载→DKIOCUNMAP→挂回, 不经 VM)
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
         DiskManager.shared.trimNative(bsd as String) { s in reply(s as NSString) }
+    }
+    // TRIM 深度检测: guest 路径 (接管的分区, ~13s 物理判决)
+    func deepTrim(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
+        DiskManager.shared.deepTrim(bsd as String) { s in reply(s as NSString) }
+    }
+    // exFAT 原生深度检测三阶段 (图案文件由 App/CLI 经原生挂载写删)
+    func deepTrimNativeBegin(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
+        DiskManager.shared.deepTrimNativeBegin(bsd as String) { s in reply(s as NSString) }
+    }
+    func deepTrimNativeLocate(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
+        DiskManager.shared.deepTrimNativeLocate(bsd as String) { s in reply(s as NSString) }
+    }
+    func deepTrimNativeExecute(_ bsd: NSString, offset: NSNumber, withReply reply: @escaping (NSString) -> Void) {
+        DiskManager.shared.deepTrimNativeExecute(bsd as String, offset: offset.uint64Value) { s in reply(s as NSString) }
+    }
+    // TRIM 通道灯: QMP unmap_ops 汇总 (✅流量/❌被拒/●未观察; 受理≠执行, 物理判决看深度检测)
+    func trimStats(withReply reply: @escaping (NSString) -> Void) {
+        DispatchQueue(label: "xpc-trimstats").async {
+            reply(DiskManager.shared.trimStats() as NSString)
+        }
     }
     // guest 串口控制台末尾输出 (诊断: 控制台是否掉回登录态/卡死, 一眼定位)
     func consoleTail(withReply reply: @escaping (NSString) -> Void) {
