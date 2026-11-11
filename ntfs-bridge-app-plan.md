@@ -863,3 +863,14 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 展开详情静默挂载 SMB 共享取可用空间; 首扫加载过渡态 ("正在扫描外接盘…"
 vs "无盘"可区分); ext* 分区卷标魔数探测 (diskutil 读不了 ext 卷标, 探测不限
 fs 类型 — diskutil 对 ext4 报 "Linux Filesystem" 按类型过滤会漏)。
+
+### 已知限制: 深度检测判决仅覆盖 DZAT 读语义 (2026-11-11 记录, 暂不修)
+
+TRIM 后读回语义有三类: DZAT (确定返零) / DRAT (确定返旧数据) / Indeterminate (任意)。
+当前 deepTrim/deepTrimNative 的判决是纯 DZAT: 读回全零=✅, 非零=❌。在
+DRAT/Indeterminate 设备上, "TRIM 执行了但读回旧数据"与"桥吞 TRIM"物理不可区分
+(受理回执与读回结果完全相同, 无外部可观测量) — 存在冤判 ❌ 的理论风险。
+评估不改的理由: 消费级 SATA/NVMe SSD (含群联/慧荣/瑞昱系 USB 桥主控) 几乎全是
+DZAT 返零型, 实测盘 (铠侠/致态/RTL9210B/JMS583 fw55.01) 无一例外。
+若未来遇到疑似冤案, 预案是三态判决: ❶ 归零=✅; ❷ 未归零+能力探针 UNMAP=no
+或 ioctl 拒绝=❌; ❸ 未归零+探针支持+受理=⚠️"已受理但读语义不返零, 物理不可判"。
