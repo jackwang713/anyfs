@@ -27,7 +27,8 @@ mkdir -p /mnt
 # 乱码共享名导致 SMB 枚举崩溃/挂载失败, 故卷标以宿主侧 diskutil 为准。
 # 注意: 不能按 sda/sdb 字母对位 — SCSI 异步探测, 字母分配是竞争结果
 # (2026-11-11 实踩: sda 落到 target1 上, 卷标张冠李戴);
-# 唯一稳定对位 = sysfs 路径里的 target0:0:N (= daemon 侧的 scsi-id)
+# 唯一稳定对位 = sysfs 路径 targetH:0:N 末位 N (= daemon 侧的 scsi-id);
+# host 号 H 因平台而异 (ARM=0, Intel/x86 实测=6), 不能写死
 get_name() {  # $1=回退名(blkid LABEL) $2=target号
     if [ -f /tmp/anyfs-names ]; then
         n=$(sed -n "s|^tgt$2=||p" /tmp/anyfs-names | head -1)
@@ -40,7 +41,7 @@ get_name() {  # $1=回退名(blkid LABEL) $2=target号
 # (字母是异步竞争结果; 重复卷标去重后缀也要确定性)
 tgt_of() {  # $1=块设备路径 → 打印 target 号 (无则空)
     readlink "/sys/block/$(basename "$1")" 2>/dev/null \
-        | sed -n 's|.*target0:0:\([0-9]*\)/.*|\1|p'
+        | sed -n 's|.*target[0-9]*:0:\([0-9]*\)/.*|\1|p'
 }
 DEVICES=""
 for t in $(seq 0 15); do

@@ -1186,7 +1186,7 @@ final class DiskManager {
             // SCSI 异步探测字母会交换, 且多块盘可能同卷标 (2026-11-11 实踩)
             guard let idx = q.partitions.firstIndex(of: bsd) else { fail("\(bsd) 不在直通列表"); return }
             let offM = q.serial.length
-            q.serial.send("MP=; for d in /dev/sd?; do case \"$(readlink /sys/block/${d#/dev/})\" in *target0:0:\(idx)/*) MP=$(grep \"^$d \" /proc/mounts | cut -d' ' -f2);; esac; done; echo DT-MP\"\"=$MP\n")
+            q.serial.send("MP=; for d in /dev/sd?; do case \"$(readlink /sys/block/${d#/dev/})\" in *target*:0:\(idx)/*) MP=$(grep \"^$d \" /proc/mounts | cut -d' ' -f2);; esac; done; echo DT-MP\"\"=$MP\n")
             guard self.waitSerial(q, "DT-MP=", offM, 15) else { fail("挂载点解析超时"); return }
             let mpSeg = q.serial.substringAfter(offM)
             guard let mp = mpSeg.components(separatedBy: .newlines)

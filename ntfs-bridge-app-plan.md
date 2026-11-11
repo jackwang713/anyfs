@@ -857,7 +857,7 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 2. **CRLF 是单个 grapheme cluster**: transcript 行尾 \r\n, `split(separator: "\n")` 永远匹配不到独立 "\n" 字符 → 解析整体落空 (trimPartition 的真实输出回传也因此静默退化, 已一并修)。根治: `components(separatedBy: .newlines)`
 3. **多盘 target 对位**: 见下条
 
-**多盘设备对位 bug (深度检测试出来的真产品 bug)**: guest SCSI 字母分配是异步探测竞争结果, 与 scsi-id 脱钩 (实测 sda 落到 target1)。后果: 多盘接管时卷标/共享名张冠李戴, SMB 共享指错卷。根治: 放弃字母对位, 按 sysfs 路径 `target0:0:N` (= daemon 的 scsi-id) 对位 — daemon 写 `tgt<N>=卷标`, init.sh 按 target 升序枚举; 重名挂载点按 target 序去重 (-2/-3), daemon shareNameOf 同规则派生。
+**多盘设备对位 bug (深度检测试出来的真产品 bug)**: guest SCSI 字母分配是异步探测竞争结果, 与 scsi-id 脱钩 (实测 sda 落到 target1)。后果: 多盘接管时卷标/共享名张冠李戴, SMB 共享指错卷。根治: 放弃字母对位, 按 sysfs 路径 `targetH:0:N` 末位 N (= daemon 的 scsi-id) 对位 — daemon 写 `tgt<N>=卷标`, init.sh 按 target 升序枚举; 重名挂载点按 target 序去重 (-2/-3), daemon shareNameOf 同规则派生。**注意 host 号 H 因平台而异** (ARM=0, Intel/x86 实测=6, 路径形如 `host6/target6:0:0/6:0:0:0/block/sda`), 匹配必须写 `target[0-9]*:0:N`, 写死 `target0:0:` 会导致 Intel 上深度检测找不到挂载点、init.sh 掉回字母兜底 (2026-11-11 实踩)。
 
 **UI 打磨 (同日)**: 分区行浅底色圆角框 (primary 6% 自适应, 信息全收敛框内);
 展开详情静默挂载 SMB 共享取可用空间; 首扫加载过渡态 ("正在扫描外接盘…"
