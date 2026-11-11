@@ -17,6 +17,7 @@ spike/bundle/bundle.tar.gz
 spike/bundle/apks/
 
 # --- 编译产物 ---
+daemon/.build/
 daemon/anyfsd
 daemon/anyfsctl
 app/anyfs-app

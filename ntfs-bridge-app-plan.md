@@ -101,10 +101,10 @@ macOS 原生只能**只读**挂载 NTFS，且不支持 ext4/btrfs 等 Linux 文�
 |---|---|---|---|
 | JMS583 (fw0212) | USB3 | ✅ 通过 | **平反**：经 SG_IO 全形态 UNMAP 实测通过（单/多描述符/256MB/63 描述符批量），"吞 TRIM"是旧固件冤案；SMART 不可读（macOS/Linux 均失败） |
 | RTL9210B | USB3 | ✅ 通过 | 2026-11-02 实测：DKIOCUNMAP → 图案读回全零（TRIM-EXECUTED）；**SMART 经 sntrealtek 完整可读（Linux 侧）**。注：App 架构内（macOS 宿主）SMART 不可得——已穷举证伪：smartctl 无透传、QEMU scsi-generic 依赖 Linux SG_IO、SCSITaskLib 插件已注销（kIOReturnUnsupported）、苹果私有 SAT 路径仅插盘探测期瞬态可见（磁盘工具稳定"不支持"）；健康监控功能定为写入探针间接评估。2026-11-10 新方法论复测（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：TRIM-EXECUTED，**大批量 UNMAP 异步销账 ~30s/180GB ≈ 6GB/s** |
-| JMS583（第三方硬盘盒 + 致态 Ti600 QLC） | USB3 | ✅ 通过 | 2026-11-10 新方法论（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：完整生产链路 TRIM-EXECUTED，归零 ~40s/171GB——**2026-11-11 归因修正：延迟在 guest 侧攒批，桥即时执行**；与铠侠成品 PSSD 的时延差实为测量方法差异，详见文末续案 |
+| JMS583（第三方硬盘盒 + 致态 Ti600 QLC） | USB3 | ✅ 通过 | 2026-11-10 新方法论（guest FIEMAP 定位 + 宿主 F_NOCACHE 轮询读回）：完整生产链路 TRIM-EXECUTED，归零 ~40s/171GB——**2026-11-11 终案: 延迟=smbfs deferred close 测试假象, 桥与全链路即时**, 详见文末终案 |
 | ASM2364 | USB3 | ✅ | workaround 后有效 |
 | ASM2464PD | USB4/雷电 | ✅ 原生 | PCIe 直通，无桥接层问题 |
-| 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 多层物理证据（详见文末排障案例）：宿主整盘/分区设备 DKIOCUNMAP、QMP qemu-io discard、**完整生产链路 guest 全量 fstrim** 均读回全零。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。曾测 86s/167GB——**2026-11-11 归因存疑**：该延迟疑为 guest 侧攒批而非桥异步销账（同日 Ti600 实验证明桥即时执行），待按 QMP 打点法复测，详见文末续案。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
+| 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 多层物理证据（详见文末排障案例）：宿主整盘/分区设备 DKIOCUNMAP、QMP qemu-io discard、**完整生产链路 guest 全量 fstrim** 均读回全零。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。曾测 86s/167GB——**2026-11-11 终案: 延迟=smbfs deferred close 测试假象 (smbd 持 fd → inode 迟回收 → discard 攒批), 全链路实测秒级**, 详见文末终案。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
 
 > 注意：桥固件差异大，同一芯片不同固件行为可能不同 → App 内置每设备自检（见"六、TRIM"章），以实测绿灯为准，不再依赖芯片白名单。
 
@@ -794,3 +794,38 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 - `guest-deep-trim.sh` v3：`--fast`（只删不全量 fstrim，验证在线 discard）+ QMP unmap_ops 打点 + 控制台信号旗 + 删除前后双标记计时
 
 **对产品结论的修正**：通道灯用 QMP 计数器、养护 fire-and-forget 的设计**维持不变且更稳固**——桥侧即时执行意味着"养护发出即生效"（guest 侧的 ~30s 攒批反而减少命令数，有益无害）。延迟归因清楚后，"每设备首次接入的物理认证"若做，可走宿主直发单条 1MB（即时出结果），不必走 guest 批量路径。
+
+### 排障终案: 延迟元凶 = macOS smbfs 客户端 deferred close (2026-11-11 下午, KIOXIA 三连复现)
+
+**终案结论: 观测到的 16~53s "TRIM 延迟"根本不是 TRIM 路径的延迟, 而是测试架构自身的产物。**
+经 SMB 埋入图案文件后, macOS smbfs 客户端在**内核层**缓存/延迟关闭 SMB 句柄 (lsof 看不到任何进程级持有者), smbd 连接进程因此在 guest 内一直持有该文件的 fd。控制台 rm 只是摘了名字 (秒回), 但 inode 还有引用, **VFS 推迟 evict; exFAT 不到 evict 不释放簇, 自然不发 discard**。等客户端句柄缓存到期 (各轮观测 16/18/24/34/38/47/53s 浮动), smbd 关 fd → 最终 iput → `exfat_evict_inode` 一次性释放 256 簇 → 256 条 discard 爆发 → virtio-scsi→QEMU→DKIOCUNMAP→桥→NAND 全程 <2s。
+
+**完整证据链 (KIOXIA disk7s2, 同日)**:
+
+| 实验 | 条件 | 结果 |
+|---|---|---|
+| rm 路径 ×2 | SMB 活着 (原始条件) | 16s/24s 延迟, ops 悬崖与归零同刻 |
+| 对照组 blkdiscard 1MB | umount 后裸发, 绕开 fs | `real 0m0.00s` + 2s 后读回全零 — **传输段瞬时** |
+| rm 路径 (run3) | 对照组副作用: smbd 被杀+remount | 秒归零 |
+| --local rm / 全量 fstrim | 无 smbd 无客户端, 图案 guest 本地 dd | **双双秒归零** (fstrim 全程 5s, +1086 ops) |
+| --no-ctrl 复现 ×2 | SMB 活着 + diskstats/fd 全打点 | 47s/53s 延迟; **FD-HELD /proc/2114/fd/29 = smbd[192.168.64.x]**; DS 显示 guest 块层在 rm 后 47/53s 才记 +256 (sectors 恰为 32MB), 与归零同刻 |
+
+**三方时钟对齐法**: DEL-BEGIN/DELETE-DONE 带 guest `date +%s`; DS watcher (diskstats 2s 采样: inflight/discards完成/sectors) 从埋图案起全程跑; 宿主轮询 zero+unmap_ops。注意宿主轮询的 "T+Xs" 标签比真实时间慢 (每轮 verify+qmp 有 ~2s 开销), 对表以 DS/QMP 跳变为准。
+
+**基建新坑 (续前 5 坑)**:
+
+6. **QMP 打点 sed 张冠李戴**: `sed 's/.*"unmap_operations"...'` 贪婪匹配拿的是 JSON 行尾设备 (bundle/ISO), usbdisk0 的计数被淹没 → 全程 +0 假象。根治: 对齐 check-trim.sh, python 解析 + `device.startswith("usbdisk")` 过滤
+7. **console XPC 只返回末尾 60 行**: DS 打点器刷屏会顶掉基线 → rm 前必须快照 CONS_PRE
+8. **打点器启动晚于 rm 丢关键 5s**: 必须从埋图案阶段就启动, 采样窗口盖住 rm 前后
+
+**金标准最终形态**:
+
+- **快速物理认证**: `guest-deep-trim.sh <分区> --fast --local` — **13s 出判决** (无 SMB, 图案 guest 本地 dd|tr 生成, 删除即 discard, T+0 读回全零)
+- 生产链路验证: `--fast` (有 SMB) 会触发本文句柄缓存延迟, 判决轮询窗口需给到 90s
+- 全量养护验证: `--local` (fstrim ~5s/167GB 空区)
+- 新工具 `qmp-stats.py`: 逐设备 QMP 计数探针 (`--watch` 实时), 替代 sed 解析
+
+**产品结论 (终)**:
+
+- "桥异步销账 30~86s" **彻底作废** — 铠侠 86s 旧案与 Ti600 22~36s 同为此句柄缓存假象; TRIM 全链路任意路径 (宿主直发/guest 块层/guest fs/fstrim) 实测都是秒级
+- 通道灯 (QMP unmap_ops 计数) 与养护 fire-and-forget 设计维持不变; 每设备首次接入的物理认证可行, 走 --local 同款 guest 内埋点, 10s 量级出结果

@@ -30,7 +30,7 @@ fi
 mkdir -p /Library/PrivilegedHelperTools
 cp anyfsd "$BIN"
 chmod 755 "$BIN"
-[ -f anyfsctl ] && cp anyfsctl /usr/local/bin/anyfsctl && chmod 755 /usr/local/bin/anyfsctl
+[ -f anyfsctl ] && { mkdir -p /usr/local/bin; cp anyfsctl /usr/local/bin/anyfsctl && chmod 755 /usr/local/bin/anyfsctl; }
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
