@@ -837,3 +837,29 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 (exfat-locate.py) **偏移完全一致** → 删除(macOS 不发 TRIM) → 卸载 → 定向 DKIOCUNMAP
 (trimNative 同款) → F_NOCACHE 读回全零 TRIM-EXECUTED。v1.1 移植定位机制选定位图 diff
 (daemon trimNative 已持有位图解析代码, 无需目录树解析)。
+
+### TRIM 深度检测产品化落地 (2026-11-11, v1)
+
+**功能形态**: 分区行 chevron 展开详情 (格式/容量/可用空间/TRIM 通道灯) + 深度检测按钮,
+不持久化检测结果; 判决物理读回为准, 通道灯只表示"有流量"(受理≠执行, 三星吞 TRIM 实踩)。
+
+**双路径** (深度检测跟着养护路径走, 不跟接管状态走):
+
+| 分区状态 | 链路 | 实现 | 实测 |
+|---|---|---|---|
+| 接管中 (NTFS/exFAT/ext4) | guest | daemon deepTrim: guest dd 埋图案(避开 smbfs deferred close) → filefrag FIEMAP → F_NOCACHE 预校验 → rm → 读回 | NTFS/ext4 ~2s ✅; 三星 ❌ ~19s |
+| exFAT 未接管 | 原生 | 三阶段 XPC: daemon 位图快照A → App 原生挂载写图案 → daemon diff 定位 → App 删除 → daemon 卸载/定向 DKIOCUNMAP/读回/挂回 (与 trimNative 共用 exfatBitmap) | ~3s ✅ |
+| NTFS/ext* 未接管 | — | 按钮置灰 (macOS 写不了, 无通路) | — |
+
+**实现期踩坑 (全部根治)**:
+
+1. **串口标记被 tty 回显提前匹配**: 短标记 (DT-LOCATED) 在命令回显里完整出现, waitSerial 命中回显而非真实输出。根治: 标记插入空引号拆断 (`echo DT-LOCA""TED`, 回显不匹配, shell 拼接后输出匹配)。脚本版当年靠 PID 后缀把标记推过 80 列换行点天然免疫
+2. **CRLF 是单个 grapheme cluster**: transcript 行尾 \r\n, `split(separator: "\n")` 永远匹配不到独立 "\n" 字符 → 解析整体落空 (trimPartition 的真实输出回传也因此静默退化, 已一并修)。根治: `components(separatedBy: .newlines)`
+3. **多盘 target 对位**: 见下条
+
+**多盘设备对位 bug (深度检测试出来的真产品 bug)**: guest SCSI 字母分配是异步探测竞争结果, 与 scsi-id 脱钩 (实测 sda 落到 target1)。后果: 多盘接管时卷标/共享名张冠李戴, SMB 共享指错卷。根治: 放弃字母对位, 按 sysfs 路径 `target0:0:N` (= daemon 的 scsi-id) 对位 — daemon 写 `tgt<N>=卷标`, init.sh 按 target 升序枚举; 重名挂载点按 target 序去重 (-2/-3), daemon shareNameOf 同规则派生。
+
+**UI 打磨 (同日)**: 分区行浅底色圆角框 (primary 6% 自适应, 信息全收敛框内);
+展开详情静默挂载 SMB 共享取可用空间; 首扫加载过渡态 ("正在扫描外接盘…"
+vs "无盘"可区分); ext* 分区卷标魔数探测 (diskutil 读不了 ext 卷标, 探测不限
+fs 类型 — diskutil 对 ext4 报 "Linux Filesystem" 按类型过滤会漏)。

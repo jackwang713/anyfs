@@ -15,6 +15,11 @@ import AppKit
     func trimNow(withReply reply: @escaping (NSString) -> Void)
     func trimPartition(_ label: NSString, withReply reply: @escaping (NSString) -> Void)
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrim(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeBegin(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeLocate(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void)
+    func deepTrimNativeExecute(_ bsd: NSString, offset: NSNumber, withReply reply: @escaping (NSString) -> Void)
+    func trimStats(withReply reply: @escaping (NSString) -> Void)
     func appQuit(withReply reply: @escaping (NSNumber) -> Void)
 }
 
@@ -45,6 +50,9 @@ struct PartInfo: Identifiable, Equatable {
     }
     // exFAT: macOS 原生可读写, 接管零收益 — 不给接管开关, 养护走 daemon 原生 DKIOCUNMAP
     var isExFAT: Bool { fs.lowercased().contains("exfat") }
+    // 深度检测可用性: 接管的分区走 guest 链路; 未接管的 exFAT 走原生链路;
+    // NTFS/ext* 未接管无通路 (macOS 写不了), 按钮置灰
+    var canDeepTest: Bool { active || (isExFAT && mounted) }
 }
 
 struct DiskGroup: Identifiable {
@@ -56,12 +64,131 @@ struct DiskGroup: Identifiable {
 @MainActor
 final class DaemonClient: ObservableObject {
     @Published var parts: [PartInfo] = []
+    @Published var loadedOnce = false               // 首次扫描完成前, 空态显示"加载中"而非"无盘"
     @Published var pending: Set<String> = []       // 接管/释放在途的分区
     @Published var trimming: Set<String> = []      // 养护在途的分区
     @Published var quitting = false                // 退出流程在途 (等 VM 关闭)
     @Published var lastError = ""
     @Published var notice = ""                     // 中性提示 (全局操作结果)
     @Published var trimResults: [String: String] = [:]  // 分区级养护结果 (bsd → 文案, 自动消失)
+
+    // MARK: 展开详情 (状态放 Client: 面板关闭重开不丢)
+    @Published var expanded: Set<String> = []          // 展开中的分区
+    @Published var freeSpace: [String: String] = [:]   // bsd → 可用空间文案
+    @Published var trimLights: [String: String] = [:]  // bsd → TRIM 通道灯文案
+    @Published var deepTesting: Set<String> = []       // 深度检测在途
+    @Published var deepResults: [String: String] = [:] // bsd → 判决文案 (不自动消失)
+
+    // 详情懒加载: 展开时取一次, refresh 时若仍展开顺带刷新
+    func toggleExpand(_ p: PartInfo) {
+        if expanded.contains(p.id) {
+            expanded.remove(p.id)
+        } else {
+            expanded.insert(p.id)
+            loadDetails(p)
+        }
+    }
+
+    func loadDetails(_ p: PartInfo) {
+        // 可用空间: statfs 挂载点 (接管→SMB 挂载点; 未接管→macOS 原生挂载点)
+        let mp = p.active ? "/Volumes/\(p.shareName)" : "/Volumes/\(p.label)"
+        func statfsString() -> String? {
+            guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: mp),
+                  let free = attrs[.systemFreeSize] as? Int64 else { return nil }
+            return String(format: "%.1fGB", Double(free) / 1e9)
+        }
+        if let s = statfsString() {
+            freeSpace[p.id] = s
+        } else if p.active {
+            // SMB 共享未挂载 → 静默挂载后重试 (不在 Finder 打开)
+            freeSpace[p.id] = "挂载中…"
+            mountShare(p, open: false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.freeSpace[p.id] = statfsString() ?? "未挂载共享"
+            }
+        } else {
+            freeSpace[p.id] = "未挂载"
+        }
+        // TRIM 通道灯 (仅接管的分区有 QMP 计数可查)
+        if p.active {
+            proxy?.trimStats { [weak self] s in
+                Task { @MainActor in
+                    let r = s as String
+                    self?.trimLights[p.id] = r
+                }
+            }
+        } else {
+            trimLights.removeValue(forKey: p.id)
+        }
+    }
+
+    // 深度检测 (金标准产品化): 接管 → daemon guest 链路 (~2s/负向 ~19s);
+    // 未接管 exFAT → 原生三阶段 (App 写删图案, daemon 位图 diff/UNMAP/读回)
+    func deepTrim(_ p: PartInfo) {
+        guard p.canDeepTest, !deepTesting.contains(p.id) else { return }
+        deepTesting.insert(p.id)
+        deepResults.removeValue(forKey: p.id)
+        if p.active {
+            proxy?.deepTrim(p.id as NSString) { [weak self] s in
+                Task { @MainActor in
+                    self?.deepTesting.remove(p.id)
+                    self?.deepResults[p.id] = s as String
+                }
+            }
+            return
+        }
+        // 原生三阶段 (对齐 anyfsctl deeptrimnative 流程)
+        let probe = "/Volumes/\(p.label)/.anyfs-trim-probe"
+        proxy?.deepTrimNativeBegin(p.id as NSString) { [weak self] s in
+            Task { @MainActor in
+                guard let self else { return }
+                guard (s as String) == "ok" else {
+                    self.deepTesting.remove(p.id); self.deepResults[p.id] = s as String; return
+                }
+                do {
+                    try Data(repeating: 0x5A, count: 32 * 1024 * 1024)
+                        .write(to: URL(fileURLWithPath: probe))
+                } catch {
+                    self.deepTesting.remove(p.id)
+                    self.deepResults[p.id] = "failed: 写图案失败 (可移动卷权限?)"
+                    return
+                }
+                Darwin.sync()
+                self.proxy?.deepTrimNativeLocate(p.id as NSString) { [weak self] s2 in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        let loc = s2 as String
+                        guard loc.hasPrefix("OFF="), let off = UInt64(loc.dropFirst(4)) else {
+                            try? FileManager.default.removeItem(atPath: probe)
+                            self.deepTesting.remove(p.id)
+                            self.deepResults[p.id] = loc
+                            return
+                        }
+                        try? FileManager.default.removeItem(atPath: probe)
+                        Darwin.sync()
+                        self.proxy?.deepTrimNativeExecute(p.id as NSString,
+                                                          offset: NSNumber(value: off)) { [weak self] s3 in
+                            Task { @MainActor in
+                                self?.deepTesting.remove(p.id)
+                                self?.deepResults[p.id] = s3 as String
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 通道灯文案解释: ops>0 有流量 / failed>0 被拒 / ● 未观察; 受理≠执行, 物理判决看深度检测
+    func trimLightText(_ p: PartInfo) -> String {
+        guard let r = trimLights[p.id] else { return p.active ? "查询中…" : "—" }
+        if r == "inactive" { return "● 未观察" }
+        let failed = Int(r.components(separatedBy: "failed=").last ?? "") ?? 0
+        let ops = Int(r.components(separatedBy: "ops=").last?.components(separatedBy: " ").first ?? "") ?? 0
+        if failed > 0 { return "❌ UNMAP 被拒 (\(failed))" }
+        if ops > 0 { return "✅ 有 TRIM 流量 (\(ops) 次, 受理≠执行)" }
+        return "● 未观察"
+    }
 
     // 消息自动消失: 代次守卫, 新消息挤掉旧的计时 (成功 6s / 错误 8s)
     private var errorGen = 0, noticeGen = 0, trimGen: [String: Int] = [:]
@@ -138,6 +265,13 @@ final class DaemonClient: ObservableObject {
                                     disk: d["disk"] as? String ?? bsd,
                                     model: d["model"] as? String ?? (d["disk"] as? String ?? ""),
                                     shareName: share)
+                }
+                // 展开中的分区顺带刷新详情 (3s 轮询驱动, 通道灯/可用空间保持新鲜)
+                if let self {
+                    self.loadedOnce = true
+                    for id in self.expanded {
+                        if let p = self.parts.first(where: { $0.id == id }) { self.loadDetails(p) }
+                    }
                 }
             }
         }
@@ -281,9 +415,21 @@ struct MenuPanel: View {
             }
             Divider()
             if client.parts.isEmpty {
-                Text("插入含 NTFS / exFAT / ext4 的外接盘\n分区会自动出现在这里")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                if client.loadedOnce {
+                    Text("插入含 NTFS / exFAT / ext4 的外接盘\n分区会自动出现在这里")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                } else {
+                    // 首次扫描的过渡态: 与"真无盘"区分开
+                    HStack(spacing: 8) {
+                        ArcSpinner(size: 14)
+                        Text("正在扫描外接盘…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .transition(.opacity)
+                }
             } else {
                 ForEach(client.groups) { g in
                     diskSection(g)
@@ -430,6 +576,14 @@ struct MenuPanel: View {
                 .disabled(client.busy)
                 .help("立即养护 (原生 TRIM, 期间卷会短暂卸载)")
             }
+            // 展开详情 chevron (所有分区行都有; 深度检测可用性在详情内判定)
+            Button { client.toggleExpand(p) } label: {
+                Image(systemName: client.expanded.contains(p.id) ? "chevron.down" : "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("详细信息")
         }
             // 养护结果挂在分区行下方, 自动消失
             if let r = client.trimResults[p.id] {
@@ -438,8 +592,44 @@ struct MenuPanel: View {
                     .foregroundStyle(r.hasPrefix("failed") ? Color.red : Color.secondary)
                     .lineLimit(2)
             }
+            // 展开详情: 格式/大小/可用空间/TRIM 通道灯 + 深度检测 (金标准, 不持久化状态)
+            if client.expanded.contains(p.id) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(p.fs) · 容量 \(p.sizeGB)GB · 可用 \(client.freeSpace[p.id] ?? "…")")
+                    HStack(spacing: 8) {
+                        Text("TRIM 通道: \(client.trimLightText(p))")
+                            .lineLimit(1)
+                        Spacer()
+                        if client.deepTesting.contains(p.id) {
+                            ArcSpinner(size: 12)
+                            Text("检测中…")
+                        } else {
+                            Button("深度检测") { client.deepTrim(p) }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(p.canDeepTest ? Color.accentColor : Color.secondary)
+                                .disabled(!p.canDeepTest)
+                                .help(p.canDeepTest
+                                      ? "埋图案→删除→物理读回判决 (~2s/负向~19s)"
+                                      : "接管后可用 (NTFS/ext* 未接管 macOS 写不了)")
+                        }
+                    }
+                    if let r = client.deepResults[p.id] {
+                        Text(r)
+                            .foregroundStyle(r.hasPrefix("failed") || r.contains("未生效")
+                                             ? Color.red : Color.green)
+                            .lineLimit(3)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            }
         }
-        .padding(.leading, 4)
+        .padding(10)
+        // 每分区一个浅底色框: 标签/开关/按钮/结果/展开详情全部收敛在框内
+        // (primary 低透明度: 深/浅模式自适应, 比面板底色略浅的浮起卡片感)
+        .background(Color.primary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var footer: some View {

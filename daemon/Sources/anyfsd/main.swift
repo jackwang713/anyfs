@@ -658,7 +658,9 @@ final class DiskManager {
     private func baseShareName(_ part: String) -> String {
         let diskutilLabel = volumeNameOf(part)
         lock.lock(); let probed = wholeDiskLabels[part] ?? ""; lock.unlock()
-        let label = diskutilLabel.isEmpty ? probed : diskutilLabel
+        var label = diskutilLabel.isEmpty ? probed : diskutilLabel
+        // ext* 分区 macOS 读不了卷标 → 魔数探测超级块 (probeWholeDisk 带缓存)
+        if label.isEmpty, let pr = probeWholeDisk(part), !pr.label.isEmpty { label = pr.label }
         guard !label.isEmpty, label.allSatisfy(\.isASCII) else { return part }
         return label.replacingOccurrences(of: " ", with: "_")
     }
@@ -734,10 +736,17 @@ final class DiskManager {
                     || infoFS.lowercased().contains("fat") || infoFS.lowercased().contains("ext")
                 guard Config.supportedFSTypes.contains(fs) || Config.supportedContent.contains(content) || infoMatch else { continue }
                 let volName = (p["VolumeName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                // macOS 读不了卷标的分区 (ext* 等) → 魔数探测超级块
+                // (与整盘探测同路径, 带缓存; 不限 fs 类型 — diskutil 对 ext4
+                // 报 "Linux Filesystem" 不含 ext, 按类型过滤会漏, 一律探)
+                var probedLabel: String? = nil
+                if volName == nil, let pr = probeWholeDisk(bsd), !pr.label.isEmpty {
+                    probedLabel = pr.label
+                }
                 let parent = parentDisk(of: bsd)
                 out.append([
                     "bsd": bsd,
-                    "label": volName ?? (p["FilesystemName"] as? String) ?? bsd,
+                    "label": volName ?? probedLabel ?? (p["FilesystemName"] as? String) ?? bsd,
                     "share": shareNameOf(bsd),
                     "fs": !infoFS.isEmpty ? infoFS : (fs.isEmpty ? content : fs),
                     "disk": parent,
