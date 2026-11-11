@@ -829,3 +829,11 @@ df(471.6GB) - sudo du(~253GB) = 218GB 幽灵
 
 - "桥异步销账 30~86s" **彻底作废** — 铠侠 86s 旧案与 Ti600 22~36s 同为此句柄缓存假象; TRIM 全链路任意路径 (宿主直发/guest 块层/guest fs/fstrim) 实测都是秒级
 - 通道灯 (QMP unmap_ops 计数) 与养护 fire-and-forget 设计维持不变; 每设备首次接入的物理认证可行, 走 --local 同款 guest 内埋点, 10s 量级出结果
+
+### 原生(免接管) exFAT 深度检测 spike 验证通过 (2026-11-11, KIOXIA disk4s2)
+
+`native-deep-trim.sh` + `exfat-bitdiff.py` 全链路 3s 贯通: macOS 原生挂载埋 32MB 图案
+→ **位图 diff 定位**(写前写后两份分配位图差分, 新分配簇段即图案) 与目录解析法
+(exfat-locate.py) **偏移完全一致** → 删除(macOS 不发 TRIM) → 卸载 → 定向 DKIOCUNMAP
+(trimNative 同款) → F_NOCACHE 读回全零 TRIM-EXECUTED。v1.1 移植定位机制选定位图 diff
+(daemon trimNative 已持有位图解析代码, 无需目录树解析)。
