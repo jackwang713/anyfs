@@ -348,11 +348,21 @@ final class QEMUManager {
     func shutdown(graceSeconds: TimeInterval = 10) {
         guard let p = process, p.isRunning else { return }
         unmountSMBShares()
-        log("干净退出: 通知 guest umount + poweroff ...")
+        log("干净退出: 通知 guest umount ...")
         serial.send("sync; for d in /mnt/*/; do umount \"$d\" 2>/dev/null; done\n")
         Thread.sleep(forTimeInterval: 2)
-        serial.send("poweroff\n")
-        let deadline = Date().addingTimeInterval(graceSeconds)
+        // QMP quit 直接收: sync+umount 已完成, 数据安全已保证, 关机只是收进程。
+        // 不依赖 guest init 形态 — 自定义 initramfs 无 init 系统, poweroff 无人
+        // 理会 → 白等满 10s 宽限才强杀 (实测每次释放 12s)
+        var qmpQuit = false
+        if let qmp = try? QMPClient(), (try? qmp.connect(path: Config.qmpPath)) != nil {
+            qmpQuit = (try? qmp.execute("quit")) != nil
+        }
+        if !qmpQuit {
+            log("QMP 不可用, 回退串口 poweroff")
+            serial.send("poweroff -f\n")
+        }
+        let deadline = Date().addingTimeInterval(qmpQuit ? 3 : graceSeconds)
         while Date() < deadline && p.isRunning { Thread.sleep(forTimeInterval: 0.5) }
         if p.isRunning {
             log("guest 未及时关机, 强制 terminate (脏位风险)")
