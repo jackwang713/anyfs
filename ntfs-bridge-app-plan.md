@@ -1005,3 +1005,10 @@ resolv.conf (固化进 mk-initramfs.py)。
 **pkg 切换已完成 (AnyFS-0.5)**: assemble-app.sh 同包携带 initramfs-anyfs
 (默认) + initramfs-virt (兜底), postinstall/install-daemon-from-app.sh 的
 INITRD 指向 anyfs 版; 释放路径 umount 后 QMP quit (2c14bd4), 卸载 ~3s。
+
+### guest 内存下限实测: 96MB OOM (2026-11-12)
+
+MEM/SMP 已支持 conf 覆盖 (daemon Config.loadOverrides)。96MB 冒烟五关全过
+(启动/网络/bundle/init.sh 均正常), 但**真实 SMB 写入负载下 guest OOM 杀 smbd**
+(512MB 随机写压测, `Out of memory: Killed process (smbd)`): 空闲 25MB 是假象,
+持续写入时页缓存+写回缓冲瞬间吃光配额。结论: 128MB 维持为下限, 不建议下调。

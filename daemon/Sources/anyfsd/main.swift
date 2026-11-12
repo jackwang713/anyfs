@@ -17,8 +17,8 @@ struct Config {
     static var initrd      = "\(spikeDir)/alpine/initramfs-virt"
     static var iso         = "\(spikeDir)/alpine/alpine-virt.iso"
     static var bundle      = "\(spikeDir)/bundle/bundle.img"
-    static let guestMemMB  = 128
-    static let guestSMP    = 2
+    static var guestMemMB  = 128
+    static var guestSMP    = 2
     static let serialBase  = "/tmp/anyfsd-serial"
     static let qmpPath     = "/tmp/anyfsd.qmp"
     static let xpcName     = "com.anyfs.daemon"
@@ -44,6 +44,8 @@ struct Config {
             case "INITRD": initrd = kv[1]
             case "ISO":    iso    = kv[1]
             case "BUNDLE": bundle = kv[1]
+            case "MEM":    guestMemMB = Int(kv[1]) ?? guestMemMB
+            case "SMP":    guestSMP = Int(kv[1]) ?? guestSMP
             default: break
             }
         }
