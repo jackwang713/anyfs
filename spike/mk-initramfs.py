@@ -28,7 +28,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mdev -s
-for m in virtio_blk virtio_scsi sd_mod virtio_net af_packet crc32c_generic libcrc32c ext4 vfat ntfs3 exfat; do
+for m in virtio_blk virtio_scsi sd_mod virtio_net af_packet crc32c_generic libcrc32c ext4 ext2 vfat ntfs3 exfat; do
   modprobe $m 2>/dev/null
 done
 mdev -s
@@ -121,7 +121,12 @@ def main():
     shutil.copy(os.path.join(stock, "bin", "busybox"), os.path.join(root, "bin", "busybox"))
     os.chmod(os.path.join(root, "bin", "busybox"), 0o755)
     # busybox 是动态链接 (pie), 必须带上 musl 加载器与 libc (实测缺了执行 /init 报 ENOENT)
-    for f in ["ld-musl-aarch64.so.1", "libc.musl-aarch64.so.1"]:
+    # 库名带架构后缀 (aarch64/x86_64), 从 stock lib/ 实际内容取, 不写死
+    musl_libs = [f for f in os.listdir(os.path.join(stock, "lib"))
+                 if f.startswith(("ld-musl-", "libc.musl-"))]
+    if not musl_libs:
+        sys.exit("FAIL: stock lib/ 里找不到 musl 加载器/libc")
+    for f in musl_libs:
         dst = os.path.join(root, "lib", f)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy(os.path.join(stock, "lib", f), dst)
@@ -130,9 +135,12 @@ def main():
         dst = os.path.join(dst_modroot, p)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy(os.path.join(modroot, p), dst)
-    # 外部模块 (ntfs3/exfat/af_packet, 均零依赖 — 取自 modloop, stock 子集没有)
+    # 外部模块 (取自 modloop, stock 子集没有; ntfs3/exfat/af_packet 零依赖,
+    # ext2 依赖 mbcache 但 mbcache 已在 WANT 闭包里)
+    # 注意: x86_64 内核 ext2 是独立模块 (ARM 版疑似 built-in), 缺了 mount -t ext2 报 ENODEV
     for f, rel in [("ntfs3.ko", "kernel/fs/ntfs3/ntfs3.ko"),
                    ("exfat.ko", "kernel/fs/exfat/exfat.ko"),
+                   ("ext2.ko", "kernel/fs/ext2/ext2.ko"),
                    ("af_packet.ko", "kernel/net/packet/af_packet.ko")]:
         src = os.path.join(EXTRA, f)
         if not os.path.exists(src):

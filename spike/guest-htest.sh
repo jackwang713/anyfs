@@ -12,7 +12,7 @@ CATPID=$!
 
 "$QEMU" \
   -machine "$MACHINE" -cpu host -smp 2 -m 128 \
-  -kernel alpine/vmlinuz-virt -initrd alpine/initramfs-anyfs -append "$CONSOLE" \
+  -kernel alpine/vmlinuz-virt -initrd alpine/initramfs-anyfs -append "console=$CONSOLE" \
   -drive file=bundle/bundle.img,format=raw,if=virtio,readonly=on \
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:1445-:445 -device virtio-net-pci,netdev=n0 \
   -serial pipe:${PIPE} -display none -monitor none &
