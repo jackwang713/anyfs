@@ -15,8 +15,10 @@ addgroup -S messagebus 2>/dev/null
 adduser -S -H -D messagebus 2>/dev/null
 addgroup -S avahi 2>/dev/null
 adduser -S -H -D avahi 2>/dev/null
-/opt/usr/bin/dbus-daemon --system --fork 2>/dev/null
-/opt/usr/sbin/avahi-daemon --daemonize 2>/dev/null
+# dbus/avahi (mDNS) 不挡就绪路径: 环境缺 machine-id 时 dbus 启动会卡 ~20s,
+# SMB 挂载走 IP 不依赖 mDNS, 后台慢起无害 (Finder 侧 anyFS.local 晚几秒出现)
+( /opt/usr/bin/dbus-daemon --system --fork 2>/dev/null
+  /opt/usr/sbin/avahi-daemon --daemonize 2>/dev/null ) &
 
 echo "BRIDGE-INIT $(date)"
 

@@ -59,7 +59,7 @@ case "takeover":
         print("用法: anyfsctl takeover disk3s3 [disk3s4 ...]")
         exit(2)
     }
-    print("接管 \(parts.joined(separator: ", ")) (约10-20秒)...")
+    print("接管 \(parts.joined(separator: ", ")) (约5秒)...")
     proxy.takeover(parts as NSArray) { s in print("takeover: \(s)"); sem.signal() }
 case "release":
     let parts = Array(CommandLine.arguments.dropFirst(2))

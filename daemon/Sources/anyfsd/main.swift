@@ -283,7 +283,12 @@ final class QEMUManager {
             process = p
             state = "running"
             log("QEMU 已启动 pid=\(p.processIdentifier) (第\(attempt)次) 分区=\(partitions.joined(separator: ","))")
-            Thread.sleep(forTimeInterval: 3)
+            // 自适应验活 (原固定 3s): 串口出现内核输出即证明活过启动危险窗
+            // (实测输出 ~0.3s 到达, 省 ~2.5s); 早夭 (如 Resource busy 抢盘) 立即落出进重试
+            let aliveDeadline = Date().addingTimeInterval(3)
+            while p.isRunning && serial.length == 0 && Date() < aliveDeadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
             if p.isRunning {
                 return
             }
@@ -304,8 +309,9 @@ final class QEMUManager {
         if !waitFor("login:", timeout: 180) { log("超时: 未等到 login"); return false }
         serial.send("\nroot\n")
         if !waitFor(":~#", timeout: 30) { log("超时: 未进入 shell"); return false }
-        serial.send("ip link set eth0 up && udhcpc -i eth0 -q\n")
-        Thread.sleep(forTimeInterval: 2)
+        // 租约到位才继续 (原固定 sleep 2s; 标记拆断防 tty 回显误匹配, 实测 <0.5s)
+        serial.send("ip link set eth0 up && udhcpc -i eth0 -q && echo NET-\"\"OK\n")
+        if !waitFor("NET-OK", timeout: 15) { log("超时: 未拿到 IP 租约"); return false }
         serial.send("mount -t ext2 -o ro /dev/vdb /opt\n")
         // 注入真实卷标映射: guest busybox blkid 读非 ASCII 卷标 (中文 FAT32 等) 会乱码。
         // 键用 tgt<N> (= scsi-id), 不用 sda/sdb 字母 — SCSI 异步探测字母是竞争结果,

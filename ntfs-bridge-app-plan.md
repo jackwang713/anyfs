@@ -957,3 +957,50 @@ attributes 时的行为), 只读目录禁止改名; chmod 后仍失败是 macOS 
    都在, 但 fruit 方案同样依赖 xattr (exFAT 不支持), veto 方案全文件系统
    通用。历史 ._ 文件只隐藏不自动删, 需清理时 guest 内
    `find /mnt -name '._*' -delete`
+
+### S3.5 自定义 initramfs 落地 + 接管提速终案 (2026-11-12)
+
+**成绩**: 接管全程 10-20s → **4.5s** (guest boot→BRIDGE-READY 2s)。三段提速:
+① daemon 验活 3s 固定 sleep → 串口出现内核输出即放行 (自适应); ② udhcpc
+固定 sleep 2s → NET-OK 标记事件化; ③ **S3.5 自定义 initramfs** 干掉 OpenRC/
+25 包 tmpfs 安装/modloop 验签, /init 直通。
+
+**形态** (`spike/mk-initramfs.py` 一键构建, 产物 2.4MB vs stock 9.4MB):
+busybox+musl (stock 里抽, **busybox 是动态链接**) + 23 个内核模块
+(stock 子集闭包 + modloop 提取的 ntfs3/exfat/af_packet, 均零依赖;
+extra-modules 再生法见脚本头注释) + 手写 /init (mdev→modprobe→lo up→
+假 login 握手兼容 daemon orchestrate) + Python 手写 newc cpio (免 root
+造 /dev/console 节点)。冒烟: `spike/guest-itest.sh` 五关 (~15s/轮)。
+
+**环境缺件清单 (每样缺了都是一个坑, 全部实踩)**:
+/bin/busybox 路径、musl 加载器+libc、af_packet (udhcpc)、crc32c (ext4 运行时
+算法不在 moddep)、/etc/passwd+group (smbd 解析 nobody/root)、/var/run→/run
+软链 (ncalrpc)、lo 显式 up (127.0.0.1 不通)、udhcpc $subnet 变量名、
+dbus machine-id (init.sh 已把 dbus/avahi 后台化不挡就绪, stock 同受益)。
+
+### 排障案例: Mac mount 全灭 — 10s DNS 超时 (2026-11-12 下午)
+
+**症状**: 自定义 initramfs 下 mount_smbfs/smbutil 全部失败 (Socket is not
+connected / Operation timed out), 但 guest 内 smbclient 走 loopback 完全正常。
+
+**冤案清单 (排查路上排除的错误方向)**: ① 两个 QEMU 干扰 (清场后复现);
+② 手写 python 协商包被秒拒 (message_id 该用 0 用了 1, 被拒是正确行为, 红鲱鱼);
+③ "stock 对照也失败" — **conf sed 因行首空格 `^INITRD` 不匹配根本没生效**
+(heredoc 粘进终端时每行被加了缩进, EOF 还漏进了文件), 所谓对照组其实是实验组;
+④ host↔guest 裸 TCP "143KB 截断" (nc -w 语义误导, 与本案无关)。
+
+**实锤链**: bridge100 抓包 → macOS 发包完全正常, **guest 收到协商请求后
+smbd 用户态恰好卡 10.1s 才回响应** (两次精确 10.1s = 超时值非负载) →
+level-10 日志 `smbd_tevent_trace_callback_before_wait: Handling event took
+10 seconds!` 确认是单事件处理器内阻塞 → **真·stock 对照 (0.076s) 确认是
+custom initramfs 环境差** → 逐项补缺: **/etc/resolv.conf 缺失即卡 10s,
+补上 10.20s→0.01s**。根因: musl 解析器在无 resolv.conf 时退化, smbd 首协商
+路径上的名字解析吃满 DNS 超时。修法: udhcpc default.script 按 $dns 写
+resolv.conf (固化进 mk-initramfs.py)。
+
+**教训**: ① "对照实验"必须先验证对照组真的成立了 (看启动日志确认 OpenRC
+标记/Run /init); ② pcap 是终结"客户端还是服务端"争论的终极裁判, 早该上;
+③ 缺件的失败模式离缺件位置可以很远 (DNS 配置缺失 → SMB 层 10s 卡顿)。
+
+**待办**: pkg 打包切换 — assemble-app.sh 目前仍打 stock initramfs-virt,
+验证稳定后把 initramfs-anyfs 纳入打包资产 (或 conf 指 spike 路径长期使用)。
