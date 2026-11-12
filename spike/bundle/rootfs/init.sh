@@ -116,6 +116,15 @@ done
     echo '  smb ports = 445'
     echo '  use sendfile = yes'
     echo '  socket options = TCP_NODELAY SO_RCVBUF=262144 SO_SNDBUF=262144'
+    # DOS 只读位不从 unix 权限位推导 (默认 map readonly=yes 会把 owner 无写位的
+    # 文件/目录报成只读 → Mac 改名/删除被拒; force user=root 下 unix 权限本就
+    # 拦不住写, 只读位是纯误导 — 2026-11-12 Linux 拷入 711 目录改名 EPERM 实踩)
+    echo '  map readonly = no'
+    # 拦截 macOS 客户端的 AppleDouble/Finder 元数据文件 (._*/.DS_Store):
+    # veto = 对客户端不可见不可写 (写入静默失败, Finder 照常工作, 仅丢标签等元数据),
+    # delete veto = 删除目录时连带清掉目录内不可见的残渣 (否则目录删不掉)
+    echo '  veto files = /._*/.DS_Store/'
+    echo '  delete veto files = yes'
     for d in /mnt/*/; do
         [ -d "$d" ] || continue
         n=$(basename "$d")

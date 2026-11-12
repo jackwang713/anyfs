@@ -902,3 +902,58 @@ mach_msg 等待, vmnet 热循环可能拖死了关机路径)。
 **免疫措施**: 收尸竞态修复后孤儿不再产生; 若 daemon 被 kill -9 等极端情况
 仍可能孤儿, 手工排查法 = ps 找多 QEMU → lsof 看 fd 是否指向已删除 inode
 → sample 确认 vmnet 线程热循环 → kill -9。
+
+### 雷电/USB4 硬盘盒兼容性预备 (2026-11-12, 改完待实测)
+
+**背景**: 此前发现链路硬过滤 `DeviceProtocol == "USB"`, 雷电/USB4 盒 (NVMe over
+PCIe 隧道) 的盘在 DA 回调里直接被丢弃, App 列表根本看不到。
+
+**改动** (daemon/Sources/anyfsd/main.swift):
+
+1. `wholeUSBDiskBSD` → `wholeExternalDiskBSD`: 协议白名单扩为
+   `USB / NVMe / PCI-Express`, 并加 `DAInternal == true` 排除闸
+   (Apple Silicon 内置盘协议本是 Apple Fabric 天然不在名单, 双闸防
+   其它形态内置 NVMe 混入)。此函数管 onAppear/onDisappear —— 不改的话
+   雷电盘接管中被拔出不会触发收尸保护。
+2. `usbProductName` → `externalProductName`: IOService 树向上找型号名,
+   优先 "USB Product Name" (USB 盒, 行为不变), 整趟找不到回退首个
+   "Model" (IONVMe 节点)。缓存 usbNameCache → extNameCache。
+
+**本不需改的部分**: 枚举 (diskutil list external 本就含雷电盘)、接管/QEMU
+直通 (/dev/rdiskX 协议无关)、TRIM 链路 (DKIOCUNMAP 是块层 ioctl, 走 macOS
+NVMe 栈原生 deallocate, 无桥片翻译)、exFAT 原生养护 (裸设备 ioctl 协议无关)。
+
+**待实测清单** (USB4 盒到货后):
+
+- [ ] 盘出现在 App 列表, 型号名正常 (NVMe 盘 MediaName 通常就是盘型号,
+      回退路径大概率用不上)
+- [ ] `diskutil info -plist diskN | grep -i protocol` 确认实际协议字符串,
+      不在白名单则补上
+- [ ] 接管/释放/深度检测全流程
+- [ ] `sudo spike/unmap-probe /dev/rdiskN` 验证 NVMe deallocate 通路
+- [ ] SMART: `smartctl --scan` + `sudo smartctl -a` — 雷电原生应可读
+      (USB 桥时代的 SMART 透传难题在雷电路径不存在)
+- [ ] USB 盘回归: 发现/接管/养护确认无回归
+
+### SMB 语义修正: 只读位误导 + AppleDouble 残渣 (2026-11-12, bundle init.sh)
+
+**案发现场**: Linux 侧拷入 ext4 的目录 (权限 711, owner 无写位) 在 Mac 上改名
+EPERM; Mac 侧拷入的目录正常。排查链: guest 内 root mv 成功 → 排除文件系统;
+chmod 755 后 Mac 仍失败 → 排除即时属性; 重新接管后成功 → **Samba 默认
+`map readonly=yes` 从 owner 写位推导 DOS 只读位** (无 vfs_fruit/store dos
+attributes 时的行为), 只读目录禁止改名; chmod 后仍失败是 macOS smbfs 客户端
+缓存了旧的只读属性, 重挂载清缓存生效。注意 Mac 上 `ls -la` 看到的
+`drwxrwxrwx jack staff` 是 SMB 挂载合成值, 不是真实权限。
+
+**修复** (spike/bundle/rootfs/init.sh, smb.conf global):
+
+1. `map readonly = no` — force user=root 下 unix 权限本就拦不住写, 从权限位
+   推导的只读位是纯误导 (会拦改名/删除), 直接关闭。选它而非
+   `store dos attributes = yes` 的理由: 后者依赖文件系统 xattr 支持,
+   Linux exFAT 驱动不支持 xattr, 多文件系统混用有坑
+2. `veto files = /._*/.DS_Store/` + `delete veto files = yes` — 拦截
+   AppleDouble/Finder 元数据文件: 对客户端不可见不可写 (写入静默失败,
+   Finder 照常), 删除目录时连带清理残渣。bundle 里 fruit.so/streams_xattr.so
+   都在, 但 fruit 方案同样依赖 xattr (exFAT 不支持), veto 方案全文件系统
+   通用。历史 ._ 文件只隐藏不自动删, 需清理时 guest 内
+   `find /mnt -name '._*' -delete`

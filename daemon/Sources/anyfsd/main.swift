@@ -519,12 +519,17 @@ final class DiskManager {
         return Unmanaged.passRetained(d)
     }
 
-    private func wholeUSBDiskBSD(_ disk: DADisk) -> String? {
+    // 协议白名单: USB 大容量存储 + 雷电/USB4 盒的 NVMe (PCIe 隧道直出);
+    // DAInternal=true 一律排除 — Apple Silicon 内置盘协议本是 Apple Fabric 不在名单,
+    // 双闸防其它形态内置 NVMe 混入
+    private func wholeExternalDiskBSD(_ disk: DADisk) -> String? {
         guard let desc = DADiskCopyDescription(disk) as? [String: Any],
               let bsd = desc[kDADiskDescriptionMediaBSDNameKey as String] as? String,
-              (desc[kDADiskDescriptionMediaWholeKey as String] as? Bool) == true,
-              (desc[kDADiskDescriptionDeviceProtocolKey as String] as? String) == "USB"
+              (desc[kDADiskDescriptionMediaWholeKey as String] as? Bool) == true
         else { return nil }
+        if (desc[kDADiskDescriptionDeviceInternalKey as String] as? Bool) == true { return nil }
+        let proto = (desc[kDADiskDescriptionDeviceProtocolKey as String] as? String) ?? ""
+        guard ["USB", "NVMe", "PCI-Express"].contains(proto) else { return nil }
         return bsd
     }
 
@@ -537,19 +542,19 @@ final class DiskManager {
     }
 
     private func invalidateInfoCache(_ reason: String) {
-        lock.lock(); infoCache.removeAll(); wholeDiskLabels.removeAll(); wholeDiskProbe.removeAll(); usbNameCache.removeAll(); lock.unlock()
+        lock.lock(); infoCache.removeAll(); wholeDiskLabels.removeAll(); wholeDiskProbe.removeAll(); extNameCache.removeAll(); lock.unlock()
         log("枚举缓存已清空 (\(reason))")
     }
 
     private func onAppear(_ disk: DADisk) {
-        guard let bsd = wholeUSBDiskBSD(disk) else { return }
+        guard let bsd = wholeExternalDiskBSD(disk) else { return }
         // bsd 名会复用 (新盘可能仍叫 disk2), 插拔一律清缓存
         invalidateInfoCache("插入 \(bsd)")
         log("DiskArb: 外接盘插入 \(bsd) (等待 App 指令, 不自动接管)")
     }
 
     private func onDisappear(_ disk: DADisk) {
-        guard let bsd = wholeUSBDiskBSD(disk) else { return }
+        guard let bsd = wholeExternalDiskBSD(disk) else { return }
         invalidateInfoCache("拔出 \(bsd)")
         lock.lock()
         let affected = activeParts.filter { parentDisk(of: $0) == bsd }.sorted()
@@ -606,21 +611,22 @@ final class DiskManager {
 
     // 整盘型号 (UI 分组标题): MediaName, 如 "RTL9210B-CG";
     // 廉价盒子会上报垃圾 MediaName (JMS583 盒实测上报 "3.2"), 字母数 <2 判为垃圾,
-    // 回退 IOKit 的 USB Product Name (该盒实际是 "NVME USB3.2")
-    private var usbNameCache: [String: String] = [:]
+    // 回退 IOKit: USB 树找 "USB Product Name", NVMe (雷电盒) 树找 "Model"
+    private var extNameCache: [String: String] = [:]
     private func modelOf(_ wholeBsd: String) -> String {
         let obj = infoOf(wholeBsd)
         let media = (obj["MediaName"] as? String) ?? ""
         if media.filter(\.isLetter).count >= 2 { return media }
-        lock.lock(); let cached = usbNameCache[wholeBsd]; lock.unlock()
+        lock.lock(); let cached = extNameCache[wholeBsd]; lock.unlock()
         if let cached { return cached }
-        let resolved = usbProductName(for: wholeBsd) ?? (media.isEmpty ? wholeBsd : media)
-        lock.lock(); usbNameCache[wholeBsd] = resolved; lock.unlock()
+        let resolved = externalProductName(for: wholeBsd) ?? (media.isEmpty ? wholeBsd : media)
+        lock.lock(); extNameCache[wholeBsd] = resolved; lock.unlock()
         return resolved
     }
 
-    // 沿 IOService 树从 IOMedia (BSD Name 匹配) 向上找带 USB Product Name 的父节点
-    private func usbProductName(for wholeBsd: String) -> String? {
+    // 沿 IOService 树从 IOMedia (BSD Name 匹配) 向上找型号名:
+    // 优先 "USB Product Name" (USB 盒); 整趟找不到则回退首个 "Model" (NVMe 节点)
+    private func externalProductName(for wholeBsd: String) -> String? {
         var it: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOMedia"), &it) == KERN_SUCCESS else { return nil }
         defer { IOObjectRelease(it) }
@@ -630,12 +636,17 @@ final class DiskManager {
             if name == wholeBsd {
                 var cur = obj
                 var result: String? = nil
+                var model: String? = nil   // 兜底: NVMe 节点的 Model
                 while true {
                     if let pn = IORegistryEntryCreateCFProperty(cur, "USB Product Name" as CFString, kCFAllocatorDefault, 0)?
                         .takeRetainedValue() as? String {
                         result = pn
                         if cur != obj { IOObjectRelease(cur) }
                         break
+                    }
+                    if model == nil, let m = IORegistryEntryCreateCFProperty(cur, "Model" as CFString, kCFAllocatorDefault, 0)?
+                        .takeRetainedValue() as? String {
+                        model = m
                     }
                     var parent: io_registry_entry_t = 0
                     let kr = IORegistryEntryGetParentEntry(cur, kIOServicePlane, &parent)
@@ -644,7 +655,7 @@ final class DiskManager {
                     cur = parent
                 }
                 IOObjectRelease(obj)
-                return result
+                return result ?? model
             }
             IOObjectRelease(obj)
         }
