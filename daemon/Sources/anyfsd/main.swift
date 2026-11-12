@@ -19,6 +19,9 @@ struct Config {
     static var bundle      = "\(spikeDir)/bundle/bundle.img"
     static var guestMemMB  = 128
     static var guestSMP    = 2
+    // 稳定运行上限: 同时最多接管的分区数 (单 VM 全包, 每分区 = 一路 SCSI 盘
+    // + 一个 SMB 导出; 内存/串口编排/收尸余量按 2 设计, 可 conf MAX_PARTS 覆盖)
+    static var maxTakeoverParts = 2
     static let serialBase  = "/tmp/anyfsd-serial"
     static let qmpPath     = "/tmp/anyfsd.qmp"
     static let xpcName     = "com.anyfs.daemon"
@@ -46,6 +49,7 @@ struct Config {
             case "BUNDLE": bundle = kv[1]
             case "MEM":    guestMemMB = Int(kv[1]) ?? guestMemMB
             case "SMP":    guestSMP = Int(kv[1]) ?? guestSMP
+            case "MAX_PARTS": maxTakeoverParts = max(1, Int(kv[1]) ?? maxTakeoverParts)
             default: break
             }
         }
@@ -805,6 +809,11 @@ final class DiskManager {
             }
             self.lock.lock(); let current = self.activeParts; let busy = self.busy; self.lock.unlock()
             guard !busy else { reply("failed: 忙 (上一次操作进行中)"); return }
+            // 稳定运行上限: 同时最多接管 maxTakeoverParts 个分区 (默认 2)
+            guard valid.count <= Config.maxTakeoverParts else {
+                reply("failed: 同时最多接管 \(Config.maxTakeoverParts) 个分区 (请求 \(valid.count) 个: \(valid.joined(separator: ",")))")
+                return
+            }
             if !current.isEmpty {
                 if current == Set(parts) {
                     reply("ready (已在服务, 无变化)")

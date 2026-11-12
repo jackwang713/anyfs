@@ -1012,3 +1012,12 @@ MEM/SMP 已支持 conf 覆盖 (daemon Config.loadOverrides)。96MB 冒烟五关�
 (启动/网络/bundle/init.sh 均正常), 但**真实 SMB 写入负载下 guest OOM 杀 smbd**
 (512MB 随机写压测, `Out of memory: Killed process (smbd)`): 空闲 25MB 是假象,
 持续写入时页缓存+写回缓冲瞬间吃光配额。结论: 128MB 维持为下限, 不建议下调。
+
+### 稳定运行上限: 同时最多接管 2 个分区 (2026-11-12)
+
+daemon takeover 入口硬限制 (Config.maxTakeoverParts, 默认 2, conf `MAX_PARTS=` 可覆盖):
+超过直接 `failed: 同时最多接管 N 个分区`, 在动 QEMU 之前拒绝。理由: 单 VM 全包架构下
+每加一个分区 = 一路 SCSI 直通盘 + 一个 SMB 导出 + 串口编排/收尸复杂度, 内存
+(默认 128MB) 与故障域余量按 2 设计; 真要多盘场景建议排队使用而非并发。
+注意部分释放的重启续上路径 (`release` → 剩余集合重 takeover) 也过同一 guard,
+remaining ≤ 原集合恒成立, 不会误伤。
