@@ -155,10 +155,20 @@ def main():
         os.chmod(dst, mode)
     put("init", INIT)
     put("usr/share/udhcpc/default.script", UDHCPC)
-    # smbd 启动要解析 guest 账户 (默认 nobody) 与 force user (root),
-    # 缺 /etc/passwd 时 getpwnam 失败 → smbd 静默退出 (实测 daemon/交互模式同症状)
-    put("etc/passwd", "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/sbin/nologin\n", 0o644)
-    put("etc/group", "root:x:0:\nnobody:x:65534:\n", 0o644)
+    # smbd 启动要解析 guest 账户 (nobody) 与 force user (root);
+    # dbus 系统总线要 messagebus/avahi 用户与 netdev 组 (dbus 配置硬引用,
+    # 缺了 dbus-daemon 拒绝启动 → avahi 连带死 → anyFS.local 不解析, App 挂载全灭)
+    put("etc/passwd",
+        "root:x:0:0:root:/root:/bin/sh\n"
+        "nobody:x:65534:65534:nobody:/:/sbin/nologin\n"
+        "messagebus:x:100:101:messagebus:/var/run/dbus:/sbin/nologin\n"
+        "avahi:x:102:103:avahi:/var/run/avahi-daemon:/sbin/nologin\n", 0o644)
+    put("etc/group",
+        "root:x:0:\n"
+        "nobody:x:65534:\n"
+        "messagebus:x:101:\n"
+        "avahi:x:103:\n"
+        "netdev:x:104:\n", 0o644)
     put("etc/hosts", "127.0.0.1 localhost\n", 0o644)
     for d in ["proc", "sys", "dev", "opt", "mnt", "root", "tmp"]:
         os.makedirs(os.path.join(root, d), exist_ok=True)
