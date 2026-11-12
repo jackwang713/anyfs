@@ -19,6 +19,8 @@ mkdir -p "$RES/qemu" "$RES/guest" "$RES/daemon"
 rm -rf "$RES/qemu/lib"
 cp -R "$ROOT/packaging/stage/qemu/" "$RES/qemu/"
 cp "$ROOT/spike/alpine/vmlinuz-virt" "$ROOT/spike/alpine/initramfs-virt" "$ROOT/spike/alpine/alpine-virt.iso" "$RES/guest/"
+# 自定义 initramfs (S3.5, 2.4MB 直通版, boot→READY 2s); stock initramfs-virt 保留兜底
+cp "$ROOT/spike/alpine/initramfs-anyfs" "$RES/guest/"
 cp "$ROOT/spike/bundle/bundle.img" "$RES/guest/"
 cp "$ROOT/daemon/anyfsd" "$RES/daemon/"
 # daemon 必须随包签名 — FDA/TCC 按证书身份授权, 裸二进制装到系统目录后授权失效 (EPERM)

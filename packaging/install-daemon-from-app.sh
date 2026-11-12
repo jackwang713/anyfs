@@ -20,7 +20,7 @@ case "$(uname -m)" in arm64) QB=qemu-system-aarch64;; *) QB=qemu-system-x86_64;;
 cat > /usr/local/etc/anyfsd.conf <<EOF
 QEMU=$RES/qemu/bin/$QB
 KERNEL=$RES/guest/vmlinuz-virt
-INITRD=$RES/guest/initramfs-virt
+INITRD=$RES/guest/initramfs-anyfs
 ISO=$RES/guest/alpine-virt.iso
 BUNDLE=$RES/guest/bundle.img
 EOF

@@ -1002,5 +1002,6 @@ resolv.conf (固化进 mk-initramfs.py)。
 标记/Run /init); ② pcap 是终结"客户端还是服务端"争论的终极裁判, 早该上;
 ③ 缺件的失败模式离缺件位置可以很远 (DNS 配置缺失 → SMB 层 10s 卡顿)。
 
-**待办**: pkg 打包切换 — assemble-app.sh 目前仍打 stock initramfs-virt,
-验证稳定后把 initramfs-anyfs 纳入打包资产 (或 conf 指 spike 路径长期使用)。
+**pkg 切换已完成 (AnyFS-0.5)**: assemble-app.sh 同包携带 initramfs-anyfs
+(默认) + initramfs-virt (兜底), postinstall/install-daemon-from-app.sh 的
+INITRD 指向 anyfs 版; 释放路径 umount 后 QMP quit (2c14bd4), 卸载 ~3s。
