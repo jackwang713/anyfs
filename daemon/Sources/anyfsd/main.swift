@@ -954,13 +954,13 @@ final class DiskManager {
         q.serial.send("for d in /mnt/*/; do fstrim \"$d\" 2>/dev/null | sed 's|^|TRIM-OK: |'; done; echo TRIM-DONE\n")
         let deadline = Date().addingTimeInterval(180)
         while Date() < deadline {
-            if q.serial.containsAfter("TRIM-DONE", offset: off) { return "fstrim 完成 (NTFS 由 -o discard 在线养护, exFAT/ext4 已 fstrim)" }
+            if q.serial.containsAfter("TRIM-DONE", offset: off) { return "fstrim 完成 (全部已挂载分区; 日常删除另由 -o discard 在线养护)" }
             Thread.sleep(forTimeInterval: 0.5)
         }
         return "fstrim 超时"
     }
 
-    // 按分区养护 (UI 每行的 🍃 按钮; NTFS 无此按钮 — discard 在线养护)
+    // 按分区养护 (UI 每行的 🍃 按钮; 所有已接管分区含 NTFS 都开放)
     // 参数为共享名 (guest 挂载点同名, 已 ASCII 化); 回传 fstrim 的真实输出防"假成功"
     func trimPartition(_ name: String) -> String {
         guard let q = qemu, q.state == "ready" else { return "无活动分区或未就绪" }
@@ -974,7 +974,15 @@ final class DiskManager {
                     .filter { $0.hasPrefix("TRIM-PART:") }
                     .last
                     .map { String($0.dropFirst(10)).trimmingCharacters(in: .whitespaces) } ?? ""
-                return detail.isEmpty ? "已修剪 \(name)" : "\(name): \(detail)"
+                // fstrim 成功输出 "/mnt/X: N bytes trimmed" → 友好化;
+                // 失败输出 (如 FITRIM ioctl failed) 原文回传并标 failed (UI 显示红色)
+                if let m = detail.range(of: #"(\d+) bytes trimmed"#, options: .regularExpression),
+                   let bytes = Double(detail[m].split(separator: " ").first ?? "0") {
+                    let gb = String(format: "%.1f", bytes / 1e9)
+                    log("养护 \(name): \(gb)GB trimmed")
+                    return "已养护 \(gb)GB"
+                }
+                return detail.isEmpty ? "已修剪 \(name)" : "failed: \(detail)"
             }
             Thread.sleep(forTimeInterval: 0.5)
         }

@@ -43,11 +43,9 @@ struct PartInfo: Identifiable, Equatable {
         return "未挂载"
     }
     var stateColor: Color { active ? .green : (mounted ? .blue : .gray) }
-    // NTFS 由 discard 在线养护, 无按钮; exFAT/ext* 需要手动 fstrim
-    var needsManualTrim: Bool {
-        let f = fs.lowercased()
-        return f.contains("exfat") || f.contains("ext") || f.contains("fat") || f.contains("msdos")
-    }
+    // guest 内全部文件系统都带 -o discard 挂载 (init.sh): 删除即在线 TRIM;
+    // 手工全量养护 (fstrim 全盘空闲区) 对所有已接管分区开放
+    var canManualTrim: Bool { active }
     // exFAT: macOS 原生可读写, 接管零收益 — 不给接管开关, 养护走 daemon 原生 DKIOCUNMAP
     var isExFAT: Bool { fs.lowercased().contains("exfat") }
     // 深度检测可用性: 接管的分区走 guest 链路; 未接管的 exFAT 走原生链路;
@@ -312,13 +310,17 @@ final class DaemonClient: ObservableObject {
         }
     }
 
-    // 按分区养护 (exFAT/ext*; NTFS 无此按钮)
+    // 按分区养护 (所有已接管分区, 含 NTFS; guest 内 fstrim 全盘空闲区)
     // 注意: 必须传 shareName (guest 挂载点同名), 显示 label 可能是非 ASCII
     func trim(_ p: PartInfo) {
         guard !busy else { return }
         trimming.insert(p.id)
-        proxy?.trimPartition(p.shareName as NSString) { [weak self] _ in
-            Task { @MainActor in self?.trimming.remove(p.id); self?.refresh() }
+        proxy?.trimPartition(p.shareName as NSString) { [weak self] s in
+            Task { @MainActor in
+                self?.trimming.remove(p.id)
+                self?.setTrimResult(p.id, s as String)
+                self?.refresh()
+            }
         }
     }
 
@@ -514,7 +516,7 @@ struct MenuPanel: View {
                 Text("\(p.fs) · \(p.sizeGB)GB")
                 Text("·")
                 Text(p.stateText).foregroundStyle(p.stateColor)
-                if p.active && !p.needsManualTrim {
+                if p.active {
                     Text("· 在线养护").foregroundStyle(.secondary)
                 }
                 if p.isExFAT && !p.active {
@@ -551,14 +553,12 @@ struct MenuPanel: View {
                 ArcSpinner(size: 14)
             } else if p.active {
                 HStack(spacing: 10) {
-                    if p.needsManualTrim {
-                        Button { client.trim(p) } label: {
-                            Image(systemName: "leaf")
-                                .font(.title3)
-                        }
-                        .buttonStyle(.borderless)
-                        .help("立即养护 (fstrim)")
+                    Button { client.trim(p) } label: {
+                        Image(systemName: "leaf")
+                            .font(.title3)
                     }
+                    .buttonStyle(.borderless)
+                    .help("立即养护 (fstrim 全盘空闲区)")
                     Button { client.mountShare(p, open: true) } label: {
                         Image(systemName: "folder.fill")
                             .font(.title3)
