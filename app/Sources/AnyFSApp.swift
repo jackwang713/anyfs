@@ -329,7 +329,7 @@ final class DaemonClient: ObservableObject {
         }
     }
 
-    // exFAT 原生养护 (不接管; daemon 卸载→DKIOCUNMAP→挂回, 不经 VM)
+    // exFAT 手动养护 (宿主直发) (不接管; daemon 卸载→DKIOCUNMAP→挂回, 不经 VM)
     func trimNative(_ p: PartInfo) {
         guard !busy else { return }
         trimming.insert(p.id)
@@ -533,7 +533,9 @@ struct MenuPanel: View {
                     Text("· 在线养护").foregroundStyle(.secondary)
                 }
                 if p.isExFAT && !p.active {
-                    Text("· 原生养护").foregroundStyle(.secondary)
+                    // macOS exFAT 驱动自己从不发 TRIM (Ti600 掉速的根因);
+                    // 这里的养护是 anyFS 手动触发: daemon 卸载 → 解析位图 → 直发 DKIOCUNMAP → 挂回
+                    Text("· 手动养护").foregroundStyle(.secondary)
                 }
             }
             .font(.callout)
@@ -580,14 +582,14 @@ struct MenuPanel: View {
                     .help("挂载并在 Finder 打开")
                 }
             } else if p.isExFAT {
-                // 原生养护: daemon 卸载 → DKIOCUNMAP → 挂回, 不经 VM
+                // 手动养护 (不经 VM): daemon 卸载 → 解析位图找空闲簇 → 直发 DKIOCUNMAP → 挂回
                 Button { client.trimNative(p) } label: {
                     Image(systemName: "leaf")
                         .font(.title3)
                 }
                 .buttonStyle(.borderless)
                 .disabled(client.busy)
-                .help("立即养护 (原生 TRIM, 期间卷会短暂卸载)")
+                .help("立即养护 (anyFS 直发 UNMAP 全盘空闲区, 期间卷会短暂卸载)")
             }
             // 展开详情 chevron (所有分区行都有; 深度检测可用性在详情内判定)
             Button { client.toggleExpand(p) } label: {

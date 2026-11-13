@@ -988,7 +988,7 @@ final class DiskManager {
         }
         return "fstrim 超时"
     }
-    // MARK: - exFAT 原生养护 (不接管, 直发 DKIOCUNMAP)
+    // MARK: - exFAT 宿主直发养护 (不接管, 直发 DKIOCUNMAP)
     // 设计: exFAT macOS 原生可读写, 接管零收益; 养护 = 卸载 → 解析 allocation bitmap
     //       找空闲簇 → 逐段 DKIOCUNMAP → 挂回, 全程不经 VM
     // DKIOCUNMAP 的 Swift shim: 宏因 dk_unmap_t 含指针不被 Clang importer 导入,
@@ -1013,7 +1013,7 @@ final class DiskManager {
     }
     private func le64(_ b: [UInt8], _ o: Int) -> UInt64 { UInt64(le32(b, o)) | UInt64(le32(b, o+4)) << 32 }
 
-    // exFAT 几何 + allocation bitmap 原文 (原生养护/深度检测共用)
+    // exFAT 几何 + allocation bitmap 原文 (宿主直发养护/深度检测共用)
     private struct ExfatGeom {
         let bitmap: [UInt8]
         let heapOff: UInt64
@@ -1111,11 +1111,11 @@ final class DiskManager {
         return true
     }
 
-    // exFAT 原生养护入口 (XPC): 卸载 → UNMAP 全部空闲段 → 挂回
+    // exFAT 宿主直发养护入口 (XPC): 卸载 → UNMAP 全部空闲段 → 挂回
     func trimNative(_ bsd: String, reply: @escaping (String) -> Void) {
         DispatchQueue(label: "trim-native").async {
             // 失败也要留痕 (教训: 只回传 UI 不写日志 → 事后无法排查)
-            func fail(_ s: String) { log("exFAT 原生养护 \(bsd) 失败: \(s)"); reply("failed: \(s)") }
+            func fail(_ s: String) { log("exFAT 宿主直发养护 \(bsd) 失败: \(s)"); reply("failed: \(s)") }
             self.lock.lock()
             let busy = self.busy, active = self.activeParts.contains(bsd)
             self.lock.unlock()
@@ -1169,7 +1169,7 @@ final class DiskManager {
                 }
                 i += 256
             }
-            log("exFAT 原生养护 \(bsd): \(done / 1_000_000)MB, \(runs.count) 段, 失败 \(failedSegs)")
+            log("exFAT 宿主直发养护 \(bsd): \(done / 1_000_000)MB, \(runs.count) 段, 失败 \(failedSegs)")
             reply(failedSegs == 0
                   ? "已养护 \(String(format: "%.1f", Double(done) / 1e9))GB (\(runs.count) 段空闲区)"
                   : "部分失败: \(failedSegs)/\(runs.count) 段被拒")
@@ -1491,7 +1491,7 @@ final class XPCService: NSObject, AnyFSDaemonProtocol, NSXPCListenerDelegate {
             reply(DiskManager.shared.trimPartition(label as String) as NSString)
         }
     }
-    // exFAT 原生养护 (卸载→DKIOCUNMAP→挂回, 不经 VM)
+    // exFAT 宿主直发养护 (卸载→DKIOCUNMAP→挂回, 不经 VM)
     func trimNative(_ bsd: NSString, withReply reply: @escaping (NSString) -> Void) {
         DiskManager.shared.trimNative(bsd as String) { s in reply(s as NSString) }
     }
