@@ -82,6 +82,33 @@ macOS 原生只能**只读**挂载 NTFS，且不支持 ext4/btrfs 等 Linux 文�
      └──────────────┘
 ```
 
+### 关键概念: 块设备级直通 ≠ USB 直通 (2026-11-13 用户问答后补记)
+
+本架构里 QEMU 只是把 `/dev/rdiskNsM` 当一个**普通文件**打开, guest 看到的
+"QEMU HARDDISK" 是 scsi-hd 模拟层虚构的身份 — 这不是 UTM/VirtualBox 那种
+"整个 USB 设备交给 guest 自带 usb-storage/UAS 驱动"的真 USB 直通。命令翻译链:
+
+```
+guest (smartctl/fstrim/mount)
+  ↓ SCSI 命令 (INQUIRY/READ/WRITE/UNMAP/ATA PASS THROUGH...)
+QEMU scsi-hd 模拟层   ← "QEMU HARDDISK" 身份是它编的
+  ↓ 只翻译标准块操作 → pread/pwrite/DKIOCUNMAP(我们的补丁)
+macOS 内核 IOUSBMassStorage (设备始终归 macOS 管, 从未易主)
+  ↓ USB BOT/UAS
+桥芯片 → SSD
+```
+
+推论 (全部有实测背书):
+- **能过的**: READ/WRITE (满速)、UNMAP (补丁打通, 金标准验证)
+- **过不去的**: 真身 INQUIRY/VPD、USB 描述符、ATA PASS THROUGH (SMART)
+  — guest 内 smartctl -d sat 实测回 `unsupported scsi opcode` (朗科盘,
+  其桥在 Ubuntu 上明明 SAT 可通 → 瓶颈在 scsi-hd 层, 与盘/桥无关)
+- **为什么不做真 USB 直通**: USB 设备插入即被 macOS 内核驱动认领, 夺走需
+  内核层配合 (VirtualBox 靠 kext); 纯 HVF 只有 CPU/内存虚拟化, QEMU 的
+  usb-host 后端是 Linux-only。免 kext 和真直通不可兼得
+- **取舍结论**: 买到 "免 kext + 满速 + TRIM", 代价是 SMART 等带外通道
+  架构性不可得 — 健康监控定为"定期直插 Linux/Windows 用 smartctl -d sat"
+
 ### 资源估算（2026-11-01 SMB spike + bundle 实测）
 | 项 | 数值 | 备注 |
 |---|---|---|
