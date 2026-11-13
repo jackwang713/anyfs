@@ -105,6 +105,7 @@ macOS 原生只能**只读**挂载 NTFS，且不支持 ext4/btrfs 等 Linux 文�
 | ASM2364 | USB3 | ✅ | workaround 后有效 |
 | ASM2464PD | USB4/雷电 | ✅ 原生 | PCIe 直通，无桥接层问题 |
 | 铠侠 EXCERIA PLUS 成品 PSSD (JMS583, 铠侠定制固件 55.01) | USB3.2 Gen2 | ✅ 通过 | 2026-11-10 多层物理证据（详见文末排障案例）：宿主整盘/分区设备 DKIOCUNMAP、QMP qemu-io discard、**完整生产链路 guest 全量 fstrim** 均读回全零。内部为 M.2 NVMe（铠侠 TC58NC1202 主控 + 96 层 BiCS TLC）。曾测 86s/167GB——**2026-11-11 终案: 延迟=smbfs deferred close 测试假象 (smbd 持 fd → inode 迟回收 → discard 攒批), 全链路实测秒级**, 详见文末终案。注意：`DKIOCGETPROVISIONSTATUS` 不受理（EIO，正常），空 UNMAP 返回 EINVAL 为通路存在的标准表现 |
+| 朗科 MobileDataStar 成品 PSSD 256GB (VID 0dd8 PID b600) | USB3 5Gbps **BOT(非UASP)** | ❌ **真不支持** | 2026-11-13 实测: `DKIOCGETFEATURES` raw=0x0 (UNMAP=no, 能力位全零), PROVISION ioctl EIO, 空 UNMAP EINVAL — 桥固件连 UNMAP 能力位都没报, App "桥拒绝 UNMAP" 判决正确 (**负路径真阴性第2例**, 第1例=ITE U盘 errno=45)。USB interface class 08-06-50 = Bulk-Only Transport 非 UASP, 与不支持 UNMAP 高度相关。内部芯片从外部不可探 (BOT 不透 VPD/inquiry 细节, guest 只见 QEMU scsi-hd 虚拟身份); 朗科 Z 系列 PSSD 家族拆解为 JMS576/JMS578 + SMI SM2258XT (供参考, 未开壳实证) |
 
 > 注意：桥固件差异大，同一芯片不同固件行为可能不同 → App 内置每设备自检（见"六、TRIM"章），以实测绿灯为准，不再依赖芯片白名单。
 
