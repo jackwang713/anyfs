@@ -88,6 +88,7 @@ final class DaemonClient: ObservableObject {
     }
 
     func loadDetails(_ p: PartInfo) {
+        guard !quitting else { return }
         // 可用空间: statfs 挂载点 (接管→SMB 挂载点; 未接管→macOS 原生挂载点)
         let mp = p.active ? "/Volumes/\(p.shareName)" : "/Volumes/\(p.label)"
         func statfsString() -> String? {
@@ -123,7 +124,7 @@ final class DaemonClient: ObservableObject {
     // 深度检测 (金标准产品化): 接管 → daemon guest 链路 (~2s/负向 ~19s);
     // 未接管 exFAT → 原生三阶段 (App 写删图案, daemon 位图 diff/UNMAP/读回)
     func deepTrim(_ p: PartInfo) {
-        guard p.canDeepTest, !deepTesting.contains(p.id) else { return }
+        guard !quitting, p.canDeepTest, !deepTesting.contains(p.id) else { return }
         deepTesting.insert(p.id)
         deepResults.removeValue(forKey: p.id)
         if p.active {
@@ -244,6 +245,10 @@ final class DaemonClient: ObservableObject {
     }
 
     func refresh() {
+        // 退出流程中冻结轮询: 否则收尸窗口内 (SMB 已卸但 activeParts 未清)
+        // 会把 daemon 重新拉起并触发 mountShare 挂向将死 VM (2026-11-13 实踩:
+        // mount_smbfs 卡 TCP 超时堵死主线程, NSApp.terminate 排不进来)
+        guard !quitting else { return }
         proxy?.listAvailable { [weak self] arr in
             Task { @MainActor in
                 self?.parts = arr.compactMap { item -> PartInfo? in
@@ -340,11 +345,17 @@ final class DaemonClient: ObservableObject {
 
     // 挂载 SMB 共享 (open=true 时在 Finder 打开)
     // 挂载点由 daemon (root) 预建并 chown 给当前用户 — /Volumes 普通用户不可建目录
+    // mount_smbfs 的等待必须离开主线程: 挂向将死/未就绪的 VM 会卡到 TCP 超时,
+    // 在主线程 waitUntilExit 会堵死 UI 和退出流程 (2026-11-13 实踩)
     func mountShare(_ p: PartInfo, open: Bool) {
+        guard !quitting else { return }
         proxy?.prepareMountpoint(p.shareName as NSString) { [weak self] path in
-            Task { @MainActor in
-                let mp = path as String
-                guard mp.hasPrefix("/") else { self?.setError(mp); return }
+            let mp = path as String
+            guard mp.hasPrefix("/") else {
+                Task { @MainActor in self?.setError(mp) }
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
                 let t = Process()
                 t.executableURL = URL(fileURLWithPath: "/sbin/mount_smbfs")
                 t.arguments = ["//GUEST@anyFS.local/\(p.shareName)", mp]
@@ -352,14 +363,16 @@ final class DaemonClient: ObservableObject {
                 t.standardError = err
                 try? t.run()
                 t.waitUntilExit()
-                if t.terminationStatus != 0 {
-                    let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let status = t.terminationStatus
+                let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                Task { @MainActor in
+                    guard let self, !self.quitting else { return }
                     // EEXIST (已挂载) 不算错误
-                    if !e.contains("File exists") {
-                        self?.setError("SMB 挂载失败: \(e.trimmingCharacters(in: .whitespacesAndNewlines))")
+                    if status != 0 && !e.contains("File exists") {
+                        self.setError("SMB 挂载失败: \(e.trimmingCharacters(in: .whitespacesAndNewlines))")
                     }
+                    if open { NSWorkspace.shared.open(URL(fileURLWithPath: mp)) }
                 }
-                if open { NSWorkspace.shared.open(URL(fileURLWithPath: mp)) }
             }
         }
     }
