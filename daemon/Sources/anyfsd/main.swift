@@ -564,7 +564,7 @@ final class DiskManager {
     }
 
     private func invalidateInfoCache(_ reason: String) {
-        lock.lock(); infoCache.removeAll(); wholeDiskLabels.removeAll(); wholeDiskProbe.removeAll(); extNameCache.removeAll(); lock.unlock()
+        lock.lock(); infoCache.removeAll(); wholeDiskLabels.removeAll(); wholeDiskProbe.removeAll(); extNameCache.removeAll(); linkCache.removeAll(); lock.unlock()
         log("枚举缓存已清空 (\(reason))")
     }
 
@@ -684,6 +684,75 @@ final class DiskManager {
         return nil
     }
 
+    // MARK: - 接口类型与协商速率 (UI 盘标题用)
+    // 数据源: USB 走 IOKit 注册表 IOUSBHostDevice 的 "Device Speed" 属性 —
+    // 协商后的实际链路速率 (非端口理论能力), 换口/换线后插拔即变;
+    // 雷电/USB4 的 NVMe 走 PCIe 隧道, DeviceProtocol 非 USB, 按协议标识
+    private var linkCache: [String: String] = [:]
+
+    func linkOf(_ wholeBsd: String) -> String {
+        lock.lock(); let cached = linkCache[wholeBsd]; lock.unlock()
+        if let cached { return cached }
+        var result = ""
+        if let s = session,
+           let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, s, wholeBsd),
+           let desc = DADiskCopyDescription(disk) as? [String: Any] {
+            let proto = (desc[kDADiskDescriptionDeviceProtocolKey as String] as? String) ?? ""
+            if proto == "USB" {
+                result = usbDeviceSpeed(for: wholeBsd).map { Self.usbSpeedText($0) } ?? "USB"
+            } else if proto == "NVMe" || proto == "PCI-Express" {
+                result = "雷电/USB4 · PCIe 隧道"
+            } else if !proto.isEmpty {
+                result = proto
+            }
+        }
+        lock.lock(); linkCache[wholeBsd] = result; lock.unlock()
+        return result
+    }
+
+    // Apple IOUSBDeviceSpeed → 人类可读 (协商速率)
+    private static func usbSpeedText(_ speed: Int) -> String {
+        switch speed {
+        case 0: return "USB 1.x · 1.5 Mb/s"
+        case 1: return "USB 1.x · 12 Mb/s"
+        case 2: return "USB 2.0 · 480 Mb/s"
+        case 3: return "USB 3.x · 5 Gb/s"
+        case 4: return "USB 3.x · 10 Gb/s"
+        case 5: return "USB 3.x/USB4 · 20 Gb/s"
+        default: return "USB · 速率码\(speed)"
+        }
+    }
+
+    // 沿 IOService 树从 IOMedia (BSD Name 匹配) 向上找首个带 "Device Speed" 的节点
+    // (IOUSBHostDevice; 与 externalProductName 同遍历模式)
+    private func usbDeviceSpeed(for wholeBsd: String) -> Int? {
+        var it: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOMedia"), &it) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(it) }
+        while case let obj = IOIteratorNext(it), obj != 0 {
+            let name = IORegistryEntryCreateCFProperty(obj, "BSD Name" as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? String
+            guard name == wholeBsd else { IOObjectRelease(obj); continue }
+            var cur = obj
+            while true {
+                if let n = IORegistryEntryCreateCFProperty(cur, "Device Speed" as CFString, kCFAllocatorDefault, 0)?
+                    .takeRetainedValue() as? NSNumber {
+                    if cur != obj { IOObjectRelease(cur) }
+                    IOObjectRelease(obj)
+                    return n.intValue
+                }
+                var parent: io_registry_entry_t = 0
+                let kr = IORegistryEntryGetParentEntry(cur, kIOServicePlane, &parent)
+                if cur != obj { IOObjectRelease(cur) }
+                guard kr == KERN_SUCCESS, parent != 0 else { break }
+                cur = parent
+            }
+            IOObjectRelease(obj)
+            return nil
+        }
+        return nil
+    }
+
     // 真实卷标 (注入 guest 用; diskutil 读非 ASCII 卷标无乱码问题)
     private func volumeNameOf(_ bsd: String) -> String {
         infoOf(bsd)["VolumeName"] as? String ?? ""
@@ -754,6 +823,7 @@ final class DiskManager {
                     "fs": probe.fs,
                     "disk": bsd,
                     "model": modelOf(bsd),
+                    "link": linkOf(bsd),
                     "sizeGB": String(format: "%.1f", Double(size) / 1e9),
                     "mounted": !((infoOf(bsd)["MountPoint"] as? String) ?? "").isEmpty,
                     "active": active.contains(bsd),
@@ -789,6 +859,7 @@ final class DiskManager {
                     "fs": !infoFS.isEmpty ? infoFS : (fs.isEmpty ? content : fs),
                     "disk": parent,
                     "model": modelOf(parent),
+                    "link": linkOf(parent),
                     "sizeGB": String(format: "%.1f", Double(p["Size"] as? Int ?? 0) / 1e9),
                     "mounted": !((p["MountPoint"] as? String) ?? "").isEmpty,
                     "active": active.contains(bsd),

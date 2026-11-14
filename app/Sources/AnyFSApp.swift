@@ -32,6 +32,7 @@ struct PartInfo: Identifiable, Equatable {
     let active: Bool      // anyFS 接管中
     let disk: String      // 父盘, 如 disk3
     let model: String     // 盘型号, 如 RTL9210B-CG
+    let link: String      // 接口类型+协商速率, 如 "USB 3.x · 10 Gb/s"
     // guest SMB 共享名 (daemon 下发, 与 guest 挂载点/smb.conf 一致);
     // 非 ASCII 卷标回退为 bsd — mount_smbfs URL 解析器不接受非 ASCII
     let shareName: String
@@ -56,6 +57,7 @@ struct PartInfo: Identifiable, Equatable {
 struct DiskGroup: Identifiable {
     let id: String        // 父盘 bsd
     let model: String
+    let link: String      // 接口类型+协商速率 (全盘整链相同, 取首个分区)
     var parts: [PartInfo]
 }
 
@@ -222,6 +224,7 @@ final class DaemonClient: ObservableObject {
     var groups: [DiskGroup] {
         Dictionary(grouping: parts, by: \.disk)
             .map { DiskGroup(id: $0.key, model: $0.value.first?.model ?? $0.key,
+                             link: $0.value.first?.link ?? "",
                              parts: $0.value.sorted { $0.id < $1.id }) }
             .sorted { $0.id < $1.id }
     }
@@ -267,6 +270,7 @@ final class DaemonClient: ObservableObject {
                                     active: d["active"] as? Bool ?? false,
                                     disk: d["disk"] as? String ?? bsd,
                                     model: d["model"] as? String ?? (d["disk"] as? String ?? ""),
+                                    link: d["link"] as? String ?? "",
                                     shareName: share)
                 }
                 // 展开中的分区顺带刷新详情 (3s 轮询驱动, 通道灯/可用空间保持新鲜)
@@ -514,6 +518,14 @@ struct MenuPanel: View {
                 Text(g.id)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if !g.link.isEmpty {
+                    Text("·")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(g.link)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             ForEach(g.parts) { p in
                 partRow(p)
