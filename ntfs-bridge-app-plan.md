@@ -1049,3 +1049,23 @@ daemon takeover 入口硬限制 (Config.maxTakeoverParts, 默认 2, conf `MAX_PA
 (默认 128MB) 与故障域余量按 2 设计; 真要多盘场景建议排队使用而非并发。
 注意部分释放的重启续上路径 (`release` → 剩余集合重 takeover) 也过同一 guard,
 remaining ≤ 原集合恒成立, 不会误伤。
+
+### 雷电/USB4 硬盘盒实测全绿 (2026-11-15, ASM2464PD + 致态 Ti600)
+
+实测清单 (对 2026-11-12 预备清单逐项验收, 设备为 ASMedia 246x 盒 @ 40Gb/s):
+
+- [x] 盘出现在列表: DeviceProtocol=**PCI-Express** (白名单含此项, 预备时的
+      双候选 NVMe/PCI-Express 判断正确), DAInternal=false 双闸生效;
+      GPT 混合盘 (EFI+APFS+NTFS) 正确只列 NTFS, APFS 留给 macOS
+- [x] 接管/QEMU 直通/释放: 全通, 与 USB 盘无差异
+- [x] 界面标识: "雷电/USB4 · PCIe 隧道" 显示正确 (system_profiler 旁证
+      40Gb/s 协商)
+- [x] TRIM: 深度检测 **2.2s 物理归零** — NVMe deallocate 原生通路,
+      无桥片翻译层, 比 USB 桥更干脆
+- [x] SMART 宿主直读: **smartctl -a 完整 NVMe 健康数据可读** (7.5, Darwin
+      原生) — USB 桥时代"SMART 不可达"死穴在雷电 PCIe 隧道不存在;
+      **健康监控功能走 daemon 宿主直读路线可行性实锤**
+- [x] SMB 速度: 写 432 / 读 502 MB/s (瓶颈 smbd 单线程, 与 USB 盘一致)
+
+Ti600 健康快照: PASSED, 寿命 3%, 备用块 100%, 写入 12.3TB, 上电 2410h,
+不安全断电 108 次 (非正常拔出成本的可量化证据)。
