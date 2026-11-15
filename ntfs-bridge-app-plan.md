@@ -328,7 +328,7 @@ NAND 实际擦除                              [实测：JMS583 fw0212 全形态
 | **NTFS (ntfs3)** | `-o discard`（实测接受，删除即 TRIM） | ❌ ntfs3 无 FITRIM（6.12 实测 ioctl ENOTSUP）；等 NTFSPLUS 进主线 | `blkdiscard /dev/sdXN`（186GB/1.82s 实测） | 主力靠 Windows 侧实时 TRIM；Mac 期间靠 discard 挂载预防 |
 | **exFAT** | 可选 `-o discard` | ✅ fstrim（实测修剪 64.7GiB，悬崖 10→29GB） | 同上 | macOS/Windows 都不发 TRIM，**App 是唯一养护来源**（独有卖点） |
 | **ext4/btrfs/FAT32** | 可选 | ✅ fstrim | 同上 | 标准路径 |
-| **APFS/HFS+** | — | ❌ Linux 无可写驱动 | ❌ | 混排盘的盲区，只能靠 macOS（默认 USB 也不发） |
+| **APFS/HFS+** | — | ❌ Linux 无可写驱动 | ❌ | USB 桥路径盲区（macOS 默认不发 TRIM）；**雷电路径 macOS 原生 TRIM 自养护，无盲区**（见 2026-11-15 翻案节） |
 
 ### NTFS 脏位与干净退出（实测踩坑）
 
@@ -1069,3 +1069,19 @@ remaining ≤ 原集合恒成立, 不会误伤。
 
 Ti600 健康快照: PASSED, 寿命 3%, 备用块 100%, 写入 12.3TB, 上电 2410h,
 不安全断电 108 次 (非正常拔出成本的可量化证据)。
+
+### 雷电盒上的 APFS TRIM 状态翻案 (2026-11-15, Ti600@ASM2464PD)
+
+**结论: 雷电/USB4 (PCIe 隧道) 下, macOS 对外置 NVMe 原生开启 TRIM
+(system_profiler: TRIM Support: Yes, 无需 trimforce) — 当年 USB 上
+"APFS 策略层禁 TRIM" 的盲区在雷电路径不存在。**
+
+- APFS 在此状态为**删除即 TRIM** (连续在线养护, 垃圾不积累), 无需任何
+  手动养护 — anyFS 养护不需要覆盖 APFS 的设计在雷电下成立且满血
+- macOS **无手动全量 fstrim 命令**; 等价路径: 抹盘/删除容器 = 全盘
+  deallocate; 已用盘强制清 = 大文件填满再删 (删除即 TRIM)
+- 对照: USB 桥时代 spaceman 日志 `(no trims)` + `0 blocks free` (策略层
+  禁发, trimforce 为全局 NVRAM 开关且对 USB 无效)
+- 修正第六章策略表 "APFS/HFS+ 混排盘盲区" 的适用范围: 该盲区仅限
+  USB 桥路径 (Linux 无可写驱动 + macOS 不发 TRIM); 雷电路径下 APFS 由
+  macOS 自养护, 无盲区
