@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="app/Resources/AppIcon.iconset/icon_256x256@2x.png" width="128" alt="AnyFS icon">
+</p>
+
 # AnyFS
 
 **English** | [中文](#中文)
