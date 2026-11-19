@@ -33,6 +33,8 @@
 
 - `Contents/Info.plist` — bundle 元数据（ID `com.anyfs.app`、版本号）
 - `Contents/Resources/AppIcon.icns`、`menubar.png`、`menubar@2x.png` — 图标资源
+- `Contents/Resources/en.lproj/Localizable.strings` — 英文 UI 映射（开发语言=中文，中文系统直接显示源码文案，英文系统查此表）
+- `Contents/Resources/zh-Hans.lproj/Localizable.strings` — 空表占位（确保中文偏好命中 zh-Hans 分支）
 - `Contents/_CodeSignature/CodeResources` — anyfs-dev 自签名
 
 ## 2. postinstall 脚本生成的系统文件（不在 payload 中）

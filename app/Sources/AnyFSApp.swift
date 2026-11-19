@@ -5,6 +5,40 @@
 import SwiftUI
 import AppKit
 
+// MARK: - 本地化
+// 开发语言=中文 (key 即源码中文文案), en.lproj/Localizable.strings 提供英文映射
+private func LS(_ key: String) -> String { NSLocalizedString(key, comment: "") }
+private var isEnglishUI: Bool { Bundle.main.preferredLocalizations.first == "en" }
+// daemon 回串翻译: 命中已知格式译英文, 未命中原样透传 (anyfsctl/日志保持中文)
+private func dmsg(_ s: String) -> String {
+    guard isEnglishUI else { return s }
+    let exact: [String: String] = [
+        "无活动分区或未就绪": "No active partition or VM not ready",
+        "无空闲空间可养护": "No free space to trim",
+        "fstrim 超时": "fstrim timed out",
+        "failed: 忙 (上一次操作进行中)": "failed: busy (previous operation in progress)",
+        "failed: 16s 未归零 — TRIM 未生效或被吞":
+            "failed: not zeroed after 16s — TRIM ineffective or swallowed",
+        "failed: UNMAP 已受理但读回非零 — 桥疑似吞 TRIM":
+            "failed: UNMAP accepted but readback non-zero — bridge may be swallowing TRIM",
+        "✅ TRIM 通路正常 — 原生 DKIOCUNMAP 读回全零":
+            "✅ TRIM path OK — native DKIOCUNMAP readback all zeros",
+    ]
+    if let t = exact[s] { return t }
+    func sub(_ pattern: String, _ template: String) -> String? {
+        guard let r = try? NSRegularExpression(pattern: pattern),
+              let m = r.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) else { return nil }
+        return r.replacementString(for: m, in: s, offset: 0, template: template)
+    }
+    if let t = sub(#"^已养护 ([\d.]+)GB \((\d+) 段空闲区\)$"#, "Trimmed $1GB ($2 free runs)") { return t }
+    if let t = sub(#"^已养护 ([\d.]+)GB$"#, "Trimmed $1GB") { return t }
+    if let t = sub(#"^已修剪 (.+)$"#, "Trimmed $1") { return t }
+    if let t = sub(#"^部分失败: (\d+)/(\d+) 段被拒$"#, "Partial failure: $1/$2 runs rejected") { return t }
+    if let t = sub(#"^✅ TRIM 通路正常 — 删除后 (\d+)s 物理归零$"#,
+                   "✅ TRIM path OK — blocks zeroed $1s after delete") { return t }
+    return s
+}
+
 @objc(AnyFSDaemonProtocol) protocol AnyFSDaemonProtocol {
     func status(withReply reply: @escaping (NSString) -> Void)
     func listAvailable(withReply reply: @escaping (NSArray) -> Void)
@@ -39,9 +73,9 @@ struct PartInfo: Identifiable, Equatable {
     // 三态文案: 回答"我现在能不能往里拷东西"
     // 注意: macOS 原生挂载的读写性因文件系统而异 — NTFS 只读, FAT32/exFAT 原生可读写
     var stateText: String {
-        if active { return "可读写" }
-        if mounted { return fs.lowercased().contains("ntfs") ? "macOS 只读" : "macOS 读写" }
-        return "未挂载"
+        if active { return LS("可读写") }
+        if mounted { return fs.lowercased().contains("ntfs") ? LS("macOS 只读") : LS("macOS 读写") }
+        return LS("未挂载")
     }
     var stateColor: Color { active ? .green : (mounted ? .blue : .gray) }
     // guest 内全部文件系统都带 -o discard 挂载 (init.sh): 删除即在线 TRIM;
@@ -102,13 +136,13 @@ final class DaemonClient: ObservableObject {
             freeSpace[p.id] = s
         } else if p.active {
             // SMB 共享未挂载 → 静默挂载后重试 (不在 Finder 打开)
-            freeSpace[p.id] = "挂载中…"
+            freeSpace[p.id] = LS("挂载中…")
             mountShare(p, open: false)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                self?.freeSpace[p.id] = statfsString() ?? "未挂载共享"
+                self?.freeSpace[p.id] = statfsString() ?? LS("未挂载共享")
             }
         } else {
-            freeSpace[p.id] = "未挂载"
+            freeSpace[p.id] = LS("未挂载")
         }
         // TRIM 通道灯 (仅接管的分区有 QMP 计数可查)
         if p.active {
@@ -133,7 +167,7 @@ final class DaemonClient: ObservableObject {
             proxy?.deepTrim(p.id as NSString) { [weak self] s in
                 Task { @MainActor in
                     self?.deepTesting.remove(p.id)
-                    self?.deepResults[p.id] = s as String
+                    self?.deepResults[p.id] = dmsg(s as String)
                 }
             }
             return
@@ -144,14 +178,14 @@ final class DaemonClient: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 guard (s as String) == "ok" else {
-                    self.deepTesting.remove(p.id); self.deepResults[p.id] = s as String; return
+                    self.deepTesting.remove(p.id); self.deepResults[p.id] = dmsg(s as String); return
                 }
                 do {
                     try Data(repeating: 0x5A, count: 32 * 1024 * 1024)
                         .write(to: URL(fileURLWithPath: probe))
                 } catch {
                     self.deepTesting.remove(p.id)
-                    self.deepResults[p.id] = "failed: 写图案失败 (可移动卷权限?)"
+                    self.deepResults[p.id] = LS("failed: 写图案失败 (可移动卷权限?)")
                     return
                 }
                 Darwin.sync()
@@ -162,7 +196,7 @@ final class DaemonClient: ObservableObject {
                         guard loc.hasPrefix("OFF="), let off = UInt64(loc.dropFirst(4)) else {
                             try? FileManager.default.removeItem(atPath: probe)
                             self.deepTesting.remove(p.id)
-                            self.deepResults[p.id] = loc
+                            self.deepResults[p.id] = dmsg(loc)
                             return
                         }
                         try? FileManager.default.removeItem(atPath: probe)
@@ -171,7 +205,7 @@ final class DaemonClient: ObservableObject {
                                                           offset: NSNumber(value: off)) { [weak self] s3 in
                             Task { @MainActor in
                                 self?.deepTesting.remove(p.id)
-                                self?.deepResults[p.id] = s3 as String
+                                self?.deepResults[p.id] = dmsg(s3 as String)
                             }
                         }
                     }
@@ -182,19 +216,19 @@ final class DaemonClient: ObservableObject {
 
     // 通道灯文案解释: ops>0 有流量 / failed>0 被拒 / ● 未观察; 受理≠执行, 物理判决看深度检测
     func trimLightText(_ p: PartInfo) -> String {
-        guard let r = trimLights[p.id] else { return p.active ? "查询中…" : "—" }
-        if r == "inactive" { return "● 未观察" }
+        guard let r = trimLights[p.id] else { return p.active ? LS("查询中…") : "—" }
+        if r == "inactive" { return LS("● 未观察") }
         let failed = Int(r.components(separatedBy: "failed=").last ?? "") ?? 0
         let ops = Int(r.components(separatedBy: "ops=").last?.components(separatedBy: " ").first ?? "") ?? 0
-        if failed > 0 { return "❌ UNMAP 被拒 (\(failed))" }
-        if ops > 0 { return "✅ 有 TRIM 流量 (\(ops) 次, 受理≠执行)" }
-        return "● 未观察"
+        if failed > 0 { return String(format: LS("❌ UNMAP 被拒 (%ld)"), failed) }
+        if ops > 0 { return String(format: LS("✅ 有 TRIM 流量 (%ld 次, 受理≠执行)"), ops) }
+        return LS("● 未观察")
     }
 
     // 消息自动消失: 代次守卫, 新消息挤掉旧的计时 (成功 6s / 错误 8s)
     private var errorGen = 0, noticeGen = 0, trimGen: [String: Int] = [:]
     func setError(_ s: String) {
-        lastError = s; errorGen += 1
+        lastError = dmsg(s); errorGen += 1
         let g = errorGen
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             guard let self, self.errorGen == g else { return }
@@ -210,7 +244,7 @@ final class DaemonClient: ObservableObject {
         }
     }
     private func setTrimResult(_ bsd: String, _ s: String) {
-        trimResults[bsd] = s
+        trimResults[bsd] = dmsg(s)
         let g = (trimGen[bsd] ?? 0) + 1
         trimGen[bsd] = g
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
@@ -238,7 +272,7 @@ final class DaemonClient: ObservableObject {
         let c = NSXPCConnection(machServiceName: "com.anyfs.daemon", options: .privileged)
         c.remoteObjectInterface = NSXPCInterface(with: AnyFSDaemonProtocol.self)
         c.interruptionHandler = { [weak self] in
-            Task { @MainActor in self?.setError("daemon 连接中断, 重连中") }
+            Task { @MainActor in self?.setError(LS("daemon 连接中断, 重连中")) }
         }
         c.resume()
         conn = c
@@ -373,7 +407,8 @@ final class DaemonClient: ObservableObject {
                     guard let self, !self.quitting else { return }
                     // EEXIST (已挂载) 不算错误
                     if status != 0 && !e.contains("File exists") {
-                        self.setError("SMB 挂载失败: \(e.trimmingCharacters(in: .whitespacesAndNewlines))")
+                        self.setError(String(format: LS("SMB 挂载失败: %@"),
+                                             e.trimmingCharacters(in: .whitespacesAndNewlines)))
                     }
                     if open { NSWorkspace.shared.open(URL(fileURLWithPath: mp)) }
                 }
@@ -497,7 +532,7 @@ struct MenuPanel: View {
             Spacer()
             if client.busy {
                 ArcSpinner(size: 14)
-                Text(client.quitting ? "正在关闭…" : (!client.trimming.isEmpty ? "养护中…" : "处理中…"))
+                Text(client.quitting ? LS("正在关闭…") : (!client.trimming.isEmpty ? LS("养护中…") : LS("处理中…")))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .transition(.opacity)

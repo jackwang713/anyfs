@@ -12,6 +12,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$BIN"
 cp Resources/menubar.png Resources/menubar@2x.png Resources/AppIcon.icns "$APP/Contents/Resources/"
+# 本地化资源 (en.lproj 等; 开发语言=中文, key 即中文文案)
+cp -R Resources/*.lproj "$APP/Contents/Resources/" 2>/dev/null || true
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -27,6 +29,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>BundleIsRelocatable</key><false/>
     <key>CFBundleVersion</key><string>0.1</string>
     <key>CFBundleShortVersionString</key><string>0.1</string>
+    <!-- 开发语言=中文: 中文系统直接显示源码 key, 英文系统查 en.lproj 映射 -->
+    <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
