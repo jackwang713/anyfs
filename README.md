@@ -1,5 +1,7 @@
 # AnyFS
 
+**中文** | [English](#english)
+
 在 macOS 上原生读写 NTFS / exFAT / ext4 移动硬盘，并自动执行 TRIM 养护，让 USB 移动 SSD 长期保持满速。
 
 ## 原理
@@ -68,3 +70,78 @@ AnyFS 本仓库代码以 [MIT License](LICENSE) 发布。
 ## 免责声明
 
 本软件直接操作物理磁盘分区。虽然已尽努力确保正确性，使用本软件导致的数据丢失风险由使用者自行承担。**重要数据请先备份。**
+
+---
+
+<a id="english"></a>
+
+# AnyFS (English)
+
+Read & write NTFS / exFAT / ext4 drives natively on macOS, with automatic TRIM maintenance that keeps USB SSDs running at full speed over the long term.
+
+## How it works
+
+macOS can't write NTFS, has no ext4 driver, and never sends TRIM to USB drives. AnyFS bridges all three gaps with a **micro Linux VM** (QEMU + Alpine, only 128MB RAM / 2 CPU cores):
+
+```
+Mac (Finder/Terminal)
+   │  SMB (anyFS.local)
+   ▼
+Micro Linux VM ── virtio passthrough ──► physical partition (NTFS / exFAT / ext4)
+   │
+   └─ online discard + periodic fstrim ──► UNMAP commands reach the SSD controller
+```
+
+Taking over a partition takes ~4.5 seconds, and the idle VM costs almost nothing. Measured SMB write throughput exceeds 500MB/s on Thunderbolt/USB4 enclosures, with SMART health data readable over the Thunderbolt/USB4 path.
+
+## Features
+
+- **NTFS / ext4 read-write**: the VM takes over the partition and re-exports it to macOS over SMB — use it directly in Finder
+- **exFAT native maintenance**: stays mounted natively in macOS; AnyFS issues TRIM directly via DKIOCUNMAP
+- **Online TRIM maintenance**: guest-side `discard` mount option plus periodic fstrim
+- **Deep TRIM verification**: writes a data pattern → deletes it → reads back the physical blocks to verify UNMAP actually reached the NAND (zero-fill verdict) — instantly identifies enclosures that swallow TRIM
+- **Thunderbolt / USB4 enclosure support**: PCIe tunneling with working SMART, native TRIM, and no speed loss
+- Menu bar app with per-partition status, capacity, and TRIM channel info at a glance
+
+## Installation
+
+Download `AnyFS-x.x.pkg` from [Releases](../../releases) and double-click to install.
+
+**Notes (the package is currently self-signed):**
+
+1. If macOS reports "unidentified developer", go to **System Settings → Privacy & Security** and click **Open Anyway**
+2. Grant **Full Disk Access** to the `anyfsd` daemon on first use
+3. Apple Silicon (arm64) Macs only
+
+## Usage
+
+Click the menu bar icon → toggle a partition on to take it over and mount it; toggle off to safely release it.
+
+Supported partition types:
+
+| Filesystem | Mode | TRIM |
+|---|---|---|
+| NTFS | VM takeover, re-exported via SMB | online discard + fstrim |
+| ext4 | VM takeover, re-exported via SMB | online discard + fstrim |
+| exFAT | native macOS mount | native DKIOCUNMAP |
+| APFS / HFS+ | native macOS | AnyFS not needed |
+
+## Building from source
+
+See [packaging/BUILD-ARM.md](packaging/BUILD-ARM.md) (Apple Silicon) and [packaging/INSTALL.md](packaging/INSTALL.md). The installer contents are documented in [docs/pkg-contents.md](docs/pkg-contents.md).
+
+## Third-party components & licensing
+
+AnyFS itself is released under the [MIT License](LICENSE).
+
+The distributed installer bundles the following third-party components, which retain their original licenses:
+
+- **QEMU** (GPLv2) — the virtual machine; source at https://www.qemu.org , build patches used by this project are in `spike/patches/`
+- **Alpine Linux** (per-component licenses, see https://alpinelinux.org ) — the guest system
+- **busybox / musl / samba / ntfs-3g**, etc. (their respective licenses) — guest-side tools
+
+These components are distributed as a mere aggregation alongside AnyFS and remain independent of its code.
+
+## Disclaimer
+
+This software operates directly on physical disk partitions. Although care has been taken to ensure correctness, you use it at your own risk of data loss. **Back up important data first.**
