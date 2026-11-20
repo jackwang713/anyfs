@@ -34,13 +34,15 @@ Taking over a partition takes ~4.5 seconds, and the idle VM costs almost nothing
 
 ## Installation
 
-Download `AnyFS-x.x.pkg` from [Releases](../../releases) and double-click to install.
+Download the installer for your Mac from [Releases](../../releases) and double-click to install:
+
+- **Apple Silicon (M 系列)**: `AnyFS-x.x.pkg`
+- **Intel (x86_64)**: `AnyFS-x.x-x86.pkg`
 
 **Notes (the package is currently self-signed):**
 
 1. If macOS reports "unidentified developer", go to **System Settings → Privacy & Security** and click **Open Anyway**
 2. Grant **Full Disk Access** to the `anyfsd` daemon on first use
-3. Apple Silicon (arm64) Macs only
 
 ## Usage
 
@@ -109,13 +111,15 @@ Mac (Finder/终端)
 
 ## 安装
 
-从 [Releases](../../releases) 下载 `AnyFS-x.x.pkg`，双击安装。
+从 [Releases](../../releases) 下载对应平台的安装包，双击安装：
+
+- **Apple Silicon (M 系列)**：`AnyFS-x.x.pkg`
+- **Intel (x86_64)**：`AnyFS-x.x-x86.pkg`
 
 **注意事项（当前为自签名包）：**
 
 1. 首次打开如遇"无法验证开发者"，请到 **系统设置 → 隐私与安全性** 中点击"仍要打开"
 2. 首次使用需授予 **完全磁盘访问权限**（给 `anyfsd` 守护进程）
-3. 仅支持 Apple Silicon (arm64) Mac
 
 ## 使用
 
