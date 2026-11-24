@@ -135,11 +135,16 @@ final class DaemonClient: ObservableObject {
         if let s = statfsString() {
             freeSpace[p.id] = s
         } else if p.active {
-            // SMB 共享未挂载 → 静默挂载后重试 (不在 Finder 打开)
-            freeSpace[p.id] = LS("挂载中…")
-            mountShare(p, open: false)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                self?.freeSpace[p.id] = statfsString() ?? LS("未挂载共享")
+            if hasUsableNetwork() {
+                // SMB 共享未挂载 → 静默挂载后重试 (不在 Finder 打开)
+                freeSpace[p.id] = LS("挂载中…")
+                mountShare(p, open: false)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    self?.freeSpace[p.id] = statfsString() ?? LS("未挂载共享")
+                }
+            } else {
+                // 无网时 mount_smbfs 必失败, 静默标注, 不在 3s 轮询里反复报错
+                freeSpace[p.id] = LS("无网络")
             }
         } else {
             freeSpace[p.id] = LS("未挂载")
@@ -318,10 +323,37 @@ final class DaemonClient: ObservableObject {
         }
     }
 
+    // 无网检测: mount_smbfs 内核态建连要求至少一个物理接口 (en*) UP+RUNNING+有 IPv4,
+    // 否则必失败 (XNU 策略层拦截, 应用层无解 — 2026-11-24 六轮实测: 改路由/回环转发均无效)。
+    // Wi-Fi 仅打开未连热点 = 无 IP = 等效无网; en* 前缀覆盖 有线/Wi-Fi/雷电/tethering,
+    // 虚拟接口 (awdl/llw/utun/bridge/lo) 天然排除。探测失败时放行 (不挡正常路)
+    private func hasUsableNetwork() -> Bool {
+        var ifs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifs) == 0 else { return true }
+        defer { freeifaddrs(ifs) }
+        var cur = ifs
+        while let p = cur {
+            defer { cur = p.pointee.ifa_next }
+            let i = p.pointee
+            let name = String(cString: i.ifa_name)
+            guard name.hasPrefix("en"),
+                  i.ifa_flags & UInt32(IFF_UP | IFF_RUNNING) == UInt32(IFF_UP | IFF_RUNNING),
+                  i.ifa_addr.pointee.sa_family == UInt8(AF_INET)
+            else { continue }
+            return true
+        }
+        return false
+    }
+
     // 开关分区: on=接管, off=释放
     func setPartition(_ p: PartInfo, on: Bool) {
         guard !busy else { return }
         if on {
+            // 无网时接管必然卡在挂载 (SMB 内核客户端限制), 提前拦截并提示
+            guard hasUsableNetwork() else {
+                setError(LS("无网络时无法建立 SMB 挂载 (macOS 系统限制), 请先连接任意 Wi-Fi 热点或有线网络"))
+                return
+            }
             pending.insert(p.id)
             let newSet = parts.filter(\.active).map(\.id) + [p.id]
             proxy?.takeover(newSet as NSArray) { [weak self] s in
@@ -387,6 +419,11 @@ final class DaemonClient: ObservableObject {
     // 在主线程 waitUntilExit 会堵死 UI 和退出流程 (2026-11-13 实踩)
     func mountShare(_ p: PartInfo, open: Bool) {
         guard !quitting else { return }
+        // 无网时 mount_smbfs 必失败且卡到超时 (内核态建连被拦), 直接提示
+        guard hasUsableNetwork() else {
+            setError(LS("无网络时无法建立 SMB 挂载 (macOS 系统限制), 请先连接任意 Wi-Fi 热点或有线网络"))
+            return
+        }
         proxy?.prepareMountpoint(p.shareName as NSString) { [weak self] path in
             let mp = path as String
             guard mp.hasPrefix("/") else {

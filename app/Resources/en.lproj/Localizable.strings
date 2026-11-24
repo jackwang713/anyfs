@@ -31,3 +31,5 @@
 "深度检测" = "Deep Test";
 "埋图案→删除→物理读回判决 (~2s/负向~19s)" = "Write pattern → delete → physical readback verdict (~2s / negative ~19s)";
 "接管后可用 (NTFS/ext* 未接管 macOS 写不了)" = "Available after takeover (macOS can't write NTFS/ext* without it)";
+"无网络时无法建立 SMB 挂载 (macOS 系统限制), 请先连接任意 Wi-Fi 热点或有线网络" = "Cannot mount SMB without a network connection (macOS limitation); connect to any Wi-Fi network or Ethernet first";
+"无网络" = "No network";
